@@ -1,0 +1,46 @@
+# dsh-log-insight bundle patch：这里只放空模板。
+#
+# 内网地址、账号密码、个人代码仓库路径都属于「本机私有配置」，不进代码仓库：
+# 在 DSH Web UI 打开「日志洞察」面板 →「设置」页填写并保存，落盘到
+#   $DSH_HOME/log-insight/settings.json（默认 ~/.dsh/log-insight/settings.json，权限 0600）
+#
+# 需要给多台机器统一预置时，也可以在本 profile 的 cordis.patch.yml 里按 id 覆盖这一行；
+# 注意 loader 对 config 是整体替换、不深合并，覆盖时要把下面所有字段重述一遍。
+- insert:
+    - id: log-insight
+      name: dsh-log-insight
+      config:
+        governance:
+          baseUrl: ''
+          hibbertBaseUrl: ''
+          username: ''
+          password: ''
+          projectId: 0
+          projectName: ''
+          datacenterHeader: ''
+        kibana:
+          baseUrl: ''
+          idp: htpasswd-viewer
+          username: ''
+          password: ''
+          index: app-*
+          insecure: true
+          namespaceByEnv:
+            fat: ''
+            uat: ''
+            dev: ''
+        # 接口分析优先委派给的会话（空则只用插件内本地分析）
+        analyzeSessionId: ''
+        # 接口分析可用的代码仓库，按「名称: 绝对路径」填写
+        projects: {}
+        # 自然语言问答使用的模型；留空则自动取第一个已注册提供方的第一个模型
+        llm:
+          provider: ''
+          model: ''
+        defaults:
+          env: fat
+          windowMinutes: 30
+          maxSpanHours: 168
+          maxHits: 200
+          exportLimit: 2000
+          timezone: Asia/Shanghai

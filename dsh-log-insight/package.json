@@ -1,0 +1,24 @@
+{
+  "name": "dsh-log-insight",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "日志与调用链洞察工具",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
