@@ -285,15 +285,15 @@ window.__ModuleLoader__.load({
 			} finally {
 				clearTimeout(timer);
 			}
-			if (result !== null && typeof result === 'object') {
-				if (typeof result.code === 'string' && result.code !== '') {
-					throw new Error(result.message ?? result.code);
-				}
-				if (result.ok === false) {
-					throw new Error(result.reason ?? 'unknown');
-				}
+			// DSH RPC 契约：成功为 { ok: true, value }，失败为 { ok: false, error }
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				const message = failure !== null && typeof failure === 'object'
+					? (failure.message ?? failure.code)
+					: (result !== null && typeof result === 'object' ? (result.reason ?? result.code) : null);
+				throw new Error(String(message ?? '请求失败'));
 			}
-			return result;
+			return result.value;
 		}
 
 		/** 面板状态记忆：切到别处再回来时恢复输入与结果。 */

@@ -526,13 +526,17 @@ export function apply(ctx, config) {
     const message = readClientRequest(body);
     if (message === null) return new Response('invalid client-request message', { status: 400 });
 
+    // DSH RPC 契约：成功为 { ok: true, value }，失败为 { ok: false, error }
     let result;
     try {
-      result = endpoint === 'audit'
+      const value = endpoint === 'audit'
         ? { ok: true, items: readAudit(Number(message.payload?.limit ?? 100)) }
         : await audited('panel', endpoint, message.payload, () => ENDPOINTS[endpoint](message.payload));
+      result = value.ok === false
+        ? { ok: false, error: { code: 'query-failed', message: String(value.reason ?? '查询失败') } }
+        : { ok: true, value };
     } catch (error) {
-      result = { ok: false, reason: String(error?.message ?? error) };
+      result = { ok: false, error: { code: 'endpoint-failed', message: String(error?.message ?? error) } };
     }
     return Response.json({ type: 'server-response', rpcId: message.rpcId, result });
   }
