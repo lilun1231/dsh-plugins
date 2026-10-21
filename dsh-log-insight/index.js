@@ -13,6 +13,17 @@ export const name = 'log-insight';
 export const inject = ['tools', 'connection'];
 
 /**
+ * 截断长文本，保留前缀并注明原长度。
+ * @param {unknown} text 原始文本
+ * @param {number} max 保留的最大字符数
+ * @returns {string} 截断后的文本
+ */
+function truncate(text, max) {
+  const value = String(text ?? '');
+  return value.length <= max ? value : `${value.slice(0, max)}…（共 ${value.length} 字符）`;
+}
+
+/**
  * 解析 Client 发来的 RPC 请求体。
  * @param {any} body 请求体
  * @returns {{rpcId: string, method: string, payload: object}|null} 解析结果
@@ -70,7 +81,7 @@ export function apply(ctx, config) {
         traceId: args.traceId,
         from: range.from,
         to: range.to,
-        limit: args.limit ?? 50,
+        limit: args.limit ?? 20,
         maxHits: defaults.maxHits ?? 200,
       });
       const result = await searchLogs(getSession(), { index: kibanaConfig.index, body });
@@ -229,7 +240,7 @@ export function apply(ctx, config) {
       env: { type: 'string', description: '环境，默认 fat' },
       from: { type: 'string', description: '起，ISO 8601 带时区' },
       to: { type: 'string', description: '止，ISO 8601 带时区' },
-      limit: { type: 'integer', description: '返回条数，默认 50，上限 200' },
+      limit: { type: 'integer', description: '返回条数，默认 20，上限 200。条数越多占用上下文越多' },
     },
     output: {
       schema: {
@@ -245,13 +256,25 @@ export function apply(ctx, config) {
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.ok
-          ? `命中 ${value.total} 条${value.truncated ? '（已截断）' : ''}\n${JSON.stringify(value.hits, null, 2)}`
-          : `查询失败：${value.reason}`,
+        text: !value.ok
+          ? `查询失败：${value.reason}`
+          : (value.hits.length === 0
+            ? '没有命中记录'
+            : `命中 ${value.total} 条${value.truncated ? '（返回前若干条）' : ''}\n`
+              + value.hits.map((hit) => {
+                const time = String(hit.timestamp ?? '').slice(0, 19).replace('T', ' ');
+                const trace = hit.traceId === undefined || hit.traceId === '' ? '' : ` ${hit.traceId}`;
+                return `${time} [${hit.service || '-'}]${trace} ${String(hit.message ?? '').slice(0, 120)}`;
+              }).join('\n')),
       }],
     },
     async execute(args) {
-      return runLogSearch(args);
+      const result = await runLogSearch(args);
+      // 模型侧只保留摘要，完整日志留给面板展开与导出
+      return {
+        ...result,
+        hits: result.hits.map((hit) => ({ ...hit, message: truncate(hit.message, 400) })),
+      };
     },
   }));
 
