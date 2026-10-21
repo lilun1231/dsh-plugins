@@ -10,7 +10,22 @@ import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.j
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
 
 export const name = 'log-insight';
-export const inject = ['tools'];
+export const inject = ['tools', 'connection'];
+
+/**
+ * 解析 Client 发来的 RPC 请求体。
+ * @param {any} body 请求体
+ * @returns {{rpcId: string, method: string, payload: object}|null} 解析结果
+ */
+function readClientRequest(body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const { type, rpcId, method, payload } = body;
+  if (type !== 'client-request') return null;
+  if (typeof rpcId !== 'string' || rpcId === '') return null;
+  if (typeof method !== 'string' || method === '') return null;
+  const carried = payload !== null && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  return { rpcId, method, payload: carried };
+}
 
 export function apply(ctx, config) {
   const kibanaConfig = config?.kibana ?? {};
@@ -31,6 +46,157 @@ export function apply(ctx, config) {
     if (!govSession) govSession = new GovernanceSession(govConfig);
     return govSession;
   }
+
+  //#region 核心查询能力（工具与面板 RPC 共用）
+
+  /** 解析环境对应的日志命名空间。 */
+  function resolveNamespace(envArg) {
+    const env = envArg ?? defaults.env ?? 'fat';
+    const namespace = kibanaConfig.namespaceByEnv?.[env];
+    if (!namespace) throw new Error(`未配置环境 ${env} 的命名空间`);
+    return { env, namespace };
+  }
+
+  /** 执行日志检索。 */
+  async function runLogSearch(args) {
+    try {
+      const { namespace } = resolveNamespace(args.env);
+      const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
+      const body = buildSearchBody({
+        namespace,
+        keyword: args.keyword,
+        services: args.services,
+        level: args.level,
+        traceId: args.traceId,
+        from: range.from,
+        to: range.to,
+        limit: args.limit ?? 50,
+        maxHits: defaults.maxHits ?? 200,
+      });
+      const result = await searchLogs(getSession(), { index: kibanaConfig.index, body });
+      return { ok: true, total: result.total, truncated: result.total > result.hits.length, hits: result.hits };
+    } catch (error) {
+      return { ok: false, total: 0, truncated: false, hits: [], reason: String(error.message ?? error) };
+    }
+  }
+
+  /** 拉取单条链路详情。 */
+  async function runTraceDetail(args) {
+    try {
+      const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: args.serialNo });
+      const spans = flattenTree(tree);
+      return { ok: true, serialNo: args.serialNo, spans, bottleneck: findBottleneck(spans) };
+    } catch (error) {
+      return { ok: false, serialNo: args.serialNo, spans: [], reason: String(error.message ?? error) };
+    }
+  }
+
+  /** 搜索链路列表。 */
+  async function runTraceSearch(args) {
+    try {
+      const tz = defaults.timezone ?? 'Asia/Shanghai';
+      const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
+      const result = await searchCallChains(getGovSession(), {
+        projectId: govConfig.projectId,
+        projectName: govConfig.projectName,
+        from: formatGovernanceTime(range.from, tz),
+        to: formatGovernanceTime(range.to, tz),
+        type: args.type ?? 'http',
+        keyword: args.keyword,
+        matchType: args.matchType ?? 1,
+        serviceName: args.service,
+        uri: args.uri,
+        limit: args.limit ?? 20,
+      });
+      let detail;
+      if (args.withDetail && result.items.length > 0) {
+        const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: result.items[0].serialNo });
+        detail = { serialNo: result.items[0].serialNo, spans: flattenTree(tree) };
+      }
+      return { ok: true, total: result.total, items: result.items, detail };
+    } catch (error) {
+      return { ok: false, total: 0, items: [], reason: String(error.message ?? error) };
+    }
+  }
+
+  /** 聚合服务状态。 */
+  async function runServiceStatus(args) {
+    try {
+      const tz = defaults.timezone ?? 'Asia/Shanghai';
+      const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
+      const stats = await aggregateServiceStatus(getGovSession(), {
+        projectId: govConfig.projectId,
+        projectName: govConfig.projectName,
+        from: formatGovernanceTime(range.from, tz),
+        to: formatGovernanceTime(range.to, tz),
+        serviceName: args.service,
+        uri: args.uri,
+      });
+      return { ok: true, ...stats };
+    } catch (error) {
+      return { ok: false, total: 0, errorCount: 0, errorRate: 0, avgDurationMs: 0, maxDurationMs: 0, topExceptions: [], reason: String(error.message ?? error) };
+    }
+  }
+
+  /** 导出日志。 */
+  async function runLogExport(args) {
+    try {
+      const { env, namespace } = resolveNamespace(args.env);
+      const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
+      const limit = Math.min(args.limit ?? defaults.exportLimit ?? 2000, 10000);
+      const hits = await fetchAllLogs(getSession(), {
+        index: kibanaConfig.index,
+        namespace,
+        keyword: args.keyword,
+        services: args.services,
+        traceId: args.traceId,
+        from: range.from,
+        to: range.to,
+        limit,
+      });
+      const dir = resolveExportDir(args.outDir ?? defaults.exportDir);
+      const written = writeLogExport({
+        dir,
+        env,
+        keyword: args.keyword,
+        from: range.from,
+        to: range.to,
+        hits,
+        format: args.format ?? 'csv',
+      });
+      return { ok: true, path: written.path, exported: written.exported };
+    } catch (error) {
+      return { ok: false, reason: String(error.message ?? error) };
+    }
+  }
+
+  /** 导出链路。 */
+  async function runTraceExport(args) {
+    try {
+      const format = args.format ?? 'url';
+      const pageUrl = `${govConfig.hibbertBaseUrl}/invokechain.html?serialNo=${encodeURIComponent(args.serialNo)}`;
+      if (format === 'url') return { ok: true, url: pageUrl };
+
+      const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: args.serialNo });
+      const dir = resolveExportDir(args.outDir ?? defaults.exportDir);
+      const file = path.join(dir, `${args.serialNo}.${format === 'json' ? 'json' : 'html'}`);
+      if (format === 'json') {
+        writeFileSync(file, JSON.stringify(tree, null, 2), 'utf8');
+        return { ok: true, path: file };
+      }
+      const spans = flattenTree(tree);
+      const rows = spans
+        .map((x) => `<div style="padding-left:${x.depth * 20}px">[${x.type}] ${x.service} ${x.uri} — ${x.durationMs}ms</div>`)
+        .join('\n');
+      const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>调用链 ${args.serialNo}</title></head><body><h2>${args.serialNo}</h2>${rows}</body></html>`;
+      writeFileSync(file, html, 'utf8');
+      return { ok: true, path: file };
+    } catch (error) {
+      return { ok: false, reason: String(error.message ?? error) };
+    }
+  }
+
+  //#endregion
 
   ctx.tools.register(defineTool({
     name: 'log_insight_ping',
@@ -85,27 +251,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const env = args.env ?? defaults.env ?? 'fat';
-        const namespace = kibanaConfig.namespaceByEnv?.[env];
-        if (!namespace) throw new Error(`未配置环境 ${env} 的命名空间`);
-        const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
-        const body = buildSearchBody({
-          namespace,
-          keyword: args.keyword,
-          services: args.services,
-          level: args.level,
-          traceId: args.traceId,
-          from: range.from,
-          to: range.to,
-          limit: args.limit ?? 50,
-          maxHits: defaults.maxHits ?? 200,
-        });
-        const result = await searchLogs(getSession(), { index: kibanaConfig.index, body });
-        return { ok: true, total: result.total, truncated: result.total > result.hits.length, hits: result.hits };
-      } catch (error) {
-        return { ok: false, total: 0, truncated: false, hits: [], reason: String(error.message ?? error) };
-      }
+      return runLogSearch(args);
     },
   }));
 
@@ -135,13 +281,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: args.serialNo });
-        const spans = flattenTree(tree);
-        return { ok: true, serialNo: args.serialNo, spans, bottleneck: findBottleneck(spans) };
-      } catch (error) {
-        return { ok: false, serialNo: args.serialNo, spans: [], reason: String(error.message ?? error) };
-      }
+      return runTraceDetail(args);
     },
   }));
 
@@ -181,30 +321,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const tz = defaults.timezone ?? 'Asia/Shanghai';
-        const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
-        const result = await searchCallChains(getGovSession(), {
-          projectId: govConfig.projectId,
-          projectName: govConfig.projectName,
-          from: formatGovernanceTime(range.from, tz),
-          to: formatGovernanceTime(range.to, tz),
-          type: args.type ?? 'http',
-          keyword: args.keyword,
-          matchType: args.matchType ?? 1,
-          serviceName: args.service,
-          uri: args.uri,
-          limit: args.limit ?? 20,
-        });
-        let detail;
-        if (args.withDetail && result.items.length > 0) {
-          const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: result.items[0].serialNo });
-          detail = { serialNo: result.items[0].serialNo, spans: flattenTree(tree) };
-        }
-        return { ok: true, total: result.total, items: result.items, detail };
-      } catch (error) {
-        return { ok: false, total: 0, items: [], reason: String(error.message ?? error) };
-      }
+      return runTraceSearch(args);
     },
   }));
 
@@ -240,21 +357,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const tz = defaults.timezone ?? 'Asia/Shanghai';
-        const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
-        const stats = await aggregateServiceStatus(getGovSession(), {
-          projectId: govConfig.projectId,
-          projectName: govConfig.projectName,
-          from: formatGovernanceTime(range.from, tz),
-          to: formatGovernanceTime(range.to, tz),
-          serviceName: args.service,
-          uri: args.uri,
-        });
-        return { ok: true, ...stats };
-      } catch (error) {
-        return { ok: false, total: 0, errorCount: 0, errorRate: 0, avgDurationMs: 0, maxDurationMs: 0, topExceptions: [], reason: String(error.message ?? error) };
-      }
+      return runServiceStatus(args);
     },
   }));
 
@@ -289,36 +392,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const env = args.env ?? defaults.env ?? 'fat';
-        const namespace = kibanaConfig.namespaceByEnv?.[env];
-        if (!namespace) throw new Error(`未配置环境 ${env} 的命名空间`);
-        const range = parseRange({ from: args.from, to: args.to, windowMinutes: defaults.windowMinutes });
-        const limit = Math.min(args.limit ?? defaults.exportLimit ?? 2000, 10000);
-        const hits = await fetchAllLogs(getSession(), {
-          index: kibanaConfig.index,
-          namespace,
-          keyword: args.keyword,
-          services: args.services,
-          traceId: args.traceId,
-          from: range.from,
-          to: range.to,
-          limit,
-        });
-        const dir = resolveExportDir(args.outDir ?? defaults.exportDir);
-        const written = writeLogExport({
-          dir,
-          env,
-          keyword: args.keyword,
-          from: range.from,
-          to: range.to,
-          hits,
-          format: args.format ?? 'csv',
-        });
-        return { ok: true, path: written.path, exported: written.exported };
-      } catch (error) {
-        return { ok: false, reason: String(error.message ?? error) };
-      }
+      return runLogExport(args);
     },
   }));
 
@@ -349,32 +423,64 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      try {
-        const format = args.format ?? 'url';
-        const pageUrl = `${govConfig.hibbertBaseUrl}/invokechain.html?serialNo=${encodeURIComponent(args.serialNo)}`;
-        if (format === 'url') {
-          return { ok: true, url: pageUrl };
-        }
-
-        const tree = await fetchTraceTree({ hibbertBaseUrl: govConfig.hibbertBaseUrl, serialNo: args.serialNo });
-        const dir = resolveExportDir(args.outDir ?? defaults.exportDir);
-        const file = path.join(dir, `${args.serialNo}.${format === 'json' ? 'json' : 'html'}`);
-
-        if (format === 'json') {
-          writeFileSync(file, JSON.stringify(tree, null, 2), 'utf8');
-          return { ok: true, path: file };
-        }
-
-        const spans = flattenTree(tree);
-        const rows = spans
-          .map((x) => `<div style="padding-left:${x.depth * 20}px">[${x.type}] ${x.service} ${x.uri} — ${x.durationMs}ms</div>`)
-          .join('\n');
-        const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>调用链 ${args.serialNo}</title></head><body><h2>${args.serialNo}</h2>${rows}</body></html>`;
-        writeFileSync(file, html, 'utf8');
-        return { ok: true, path: file };
-      } catch (error) {
-        return { ok: false, reason: String(error.message ?? error) };
-      }
+      return runTraceExport(args);
     },
   }));
+
+  //#region 面板 RPC：Web UI 通过 connection.rpc 调用同一批核心函数
+
+  /** 面板可调用的端点与处理函数映射。 */
+  const ENDPOINTS = Object.freeze({
+    search: runLogSearch,
+    trace: runTraceDetail,
+    traces: runTraceSearch,
+    status: runServiceStatus,
+    'export-log': runLogExport,
+    'export-trace': runTraceExport,
+  });
+
+  /**
+   * 处理一次面板 RPC 请求。
+   * @param {Request} request 请求
+   * @param {string} endpoint 端点名
+   * @returns {Promise<Response>} 响应
+   */
+  async function routeEndpoint(request, endpoint) {
+    const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+    if (contentType !== 'application/json') {
+      return new Response('content type must be application/json', { status: 415 });
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response('body is not JSON', { status: 400 });
+    }
+    const message = readClientRequest(body);
+    if (message === null) return new Response('invalid client-request message', { status: 400 });
+
+    let result;
+    try {
+      result = await ENDPOINTS[endpoint](message.payload);
+    } catch (error) {
+      result = { ok: false, reason: String(error?.message ?? error) };
+    }
+    return Response.json({ type: 'server-response', rpcId: message.rpcId, result });
+  }
+
+  // 缺少 connection 或 effect 时静默跳过，插件在无 Web 能力的环境下仍只提供工具
+  const canRegisterRpc = typeof ctx.effect === 'function'
+    && typeof ctx.connection?.fetch?.register === 'function';
+  if (canRegisterRpc) {
+    for (const endpoint of Object.keys(ENDPOINTS)) {
+      ctx.effect(() => ctx.connection.fetch.register({
+        path: `/api/log-insight/${endpoint}`,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: (request) => routeEndpoint(request, endpoint),
+      }), `log-insight: ${endpoint} rpc route`);
+    }
+  }
+
+  //#endregion
 }
