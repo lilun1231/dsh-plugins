@@ -8,6 +8,7 @@ import { GovernanceSession } from './lib/governance-auth.js';
 import { searchCallChains, aggregateServiceStatus } from './lib/governance-query.js';
 import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.js';
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
+import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
 
 export const name = 'log-insight';
 export const inject = ['tools', 'connection'];
@@ -56,6 +57,42 @@ export function apply(ctx, config) {
   function getGovSession() {
     if (!govSession) govSession = new GovernanceSession(govConfig);
     return govSession;
+  }
+
+  /**
+   * 执行一次查询并记录审计，失败也记录。
+   * @param {string} source 来源，tool 或 panel
+   * @param {string} action 操作名
+   * @param {object} payload 原始参数
+   * @param {() => Promise<object>} run 实际执行
+   * @returns {Promise<object>} 查询结果
+   */
+  async function audited(source, action, payload, run) {
+    const started = Date.now();
+    try {
+      const result = await run();
+      appendAudit({
+        source,
+        action,
+        params: summarizeParams(payload),
+        ok: result.ok !== false,
+        durationMs: Date.now() - started,
+        total: result.total,
+        returned: Array.isArray(result.hits) ? result.hits.length : (Array.isArray(result.items) ? result.items.length : undefined),
+        error: result.ok === false ? result.reason : undefined,
+      });
+      return result;
+    } catch (error) {
+      appendAudit({
+        source,
+        action,
+        params: summarizeParams(payload),
+        ok: false,
+        durationMs: Date.now() - started,
+        error: String(error?.message ?? error),
+      });
+      throw error;
+    }
   }
 
   //#region 核心查询能力（工具与面板 RPC 共用）
@@ -269,7 +306,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      const result = await runLogSearch(args);
+      const result = await audited('tool', 'log_search', args, () => runLogSearch(args));
       // 模型侧只保留摘要，完整日志留给面板展开与导出
       return {
         ...result,
@@ -304,7 +341,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      return runTraceDetail(args);
+      return audited('tool', 'trace_detail', args, () => runTraceDetail(args));
     },
   }));
 
@@ -344,7 +381,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      return runTraceSearch(args);
+      return audited('tool', 'trace_search', args, () => runTraceSearch(args));
     },
   }));
 
@@ -380,7 +417,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      return runServiceStatus(args);
+      return audited('tool', 'service_status', args, () => runServiceStatus(args));
     },
   }));
 
@@ -415,7 +452,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      return runLogExport(args);
+      return audited('tool', 'log_export', args, () => runLogExport(args));
     },
   }));
 
@@ -446,7 +483,7 @@ export function apply(ctx, config) {
       }],
     },
     async execute(args) {
-      return runTraceExport(args);
+      return audited('tool', 'trace_export', args, () => runTraceExport(args));
     },
   }));
 
@@ -454,6 +491,13 @@ export function apply(ctx, config) {
 
   /** 面板可调用的端点与处理函数映射。 */
   const ENDPOINTS = Object.freeze({
+    ping: async () => ({
+      ok: true,
+      env: defaults.env ?? 'fat',
+      kibana: kibanaConfig.baseUrl ?? '',
+      governance: govConfig.baseUrl ?? '',
+      hibbert: govConfig.hibbertBaseUrl ?? '',
+    }),
     search: runLogSearch,
     trace: runTraceDetail,
     traces: runTraceSearch,
@@ -484,18 +528,23 @@ export function apply(ctx, config) {
 
     let result;
     try {
-      result = await ENDPOINTS[endpoint](message.payload);
+      result = endpoint === 'audit'
+        ? { ok: true, items: readAudit(Number(message.payload?.limit ?? 100)) }
+        : await audited('panel', endpoint, message.payload, () => ENDPOINTS[endpoint](message.payload));
     } catch (error) {
       result = { ok: false, reason: String(error?.message ?? error) };
     }
     return Response.json({ type: 'server-response', rpcId: message.rpcId, result });
   }
 
+  // audit 端点只读文件，不进 ENDPOINTS，避免记录「查看审计」本身
+  const ROUTES = [...Object.keys(ENDPOINTS), 'audit'];
+
   // 缺少 connection 或 effect 时静默跳过，插件在无 Web 能力的环境下仍只提供工具
   const canRegisterRpc = typeof ctx.effect === 'function'
     && typeof ctx.connection?.fetch?.register === 'function';
   if (canRegisterRpc) {
-    for (const endpoint of Object.keys(ENDPOINTS)) {
+    for (const endpoint of ROUTES) {
       ctx.effect(() => ctx.connection.fetch.register({
         path: `/api/log-insight/${endpoint}`,
         methods: ['POST'],

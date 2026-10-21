@@ -31,6 +31,16 @@ window.__ModuleLoader__.load({
 			tabLogs: '日志',
 			tabTrace: '调用链',
 			tabStatus: '服务状态',
+			tabAudit: '操作日志',
+			connected: '已连接',
+			disconnected: '未连接',
+			refresh: '刷新',
+			auditHint: '记录本插件的所有查询与导出，便于回溯与排查',
+			noAudit: '暂无操作记录',
+			sourcePanel: '面板',
+			sourceTool: '对话',
+			okLabel: '成功',
+			failLabel: '失败',
 			keyword: '关键字',
 			keywordPlaceholder: '错误码、接口路径或入参',
 			traceId: '流水号',
@@ -73,6 +83,16 @@ window.__ModuleLoader__.load({
 			tabLogs: 'Logs',
 			tabTrace: 'Traces',
 			tabStatus: 'Status',
+			tabAudit: 'Activity',
+			connected: 'connected',
+			disconnected: 'offline',
+			refresh: 'Refresh',
+			auditHint: 'Every query and export this plugin performs',
+			noAudit: 'No activity yet',
+			sourcePanel: 'Panel',
+			sourceTool: 'Chat',
+			okLabel: 'ok',
+			failLabel: 'failed',
 			keyword: 'Keyword',
 			keywordPlaceholder: 'error code, path or parameter',
 			traceId: 'Trace id',
@@ -247,12 +267,24 @@ window.__ModuleLoader__.load({
 
 		//#region rpc
 		/** 调用 Host 侧端点，统一把错误转成异常。 */
-		async function callRpc(endpoint, payload) {
+		async function callRpc(endpoint, payload, timeoutMs = 20000) {
 			const connection = hostCtx === null ? null : hostCtx.connection;
 			if (connection === null || connection === undefined || typeof connection.rpc?.call !== 'function') {
 				throw new Error('连接不可用');
 			}
-			const result = await connection.rpc.call(CHANNEL, METHOD_BASE + endpoint, payload ?? {});
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
+			let result;
+			try {
+				result = await connection.rpc.call(CHANNEL, METHOD_BASE + endpoint, payload ?? {}, controller.signal);
+			} catch (thrown) {
+				if (thrown !== null && typeof thrown === 'object' && thrown.name === 'AbortError') {
+					throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+				}
+				throw thrown;
+			} finally {
+				clearTimeout(timer);
+			}
 			if (result !== null && typeof result === 'object') {
 				if (typeof result.code === 'string' && result.code !== '') {
 					throw new Error(result.message ?? result.code);
@@ -263,6 +295,15 @@ window.__ModuleLoader__.load({
 			}
 			return result;
 		}
+
+		/** 面板状态记忆：切到别处再回来时恢复输入与结果。 */
+		const memory = {
+			tab: 'logs',
+			logs: { keyword: '', services: '', minutes: 30, result: null },
+			trace: { serialNo: '', detail: null },
+			status: { service: 'hall-restful', minutes: 60, stats: null },
+			audit: { items: null },
+		};
 
 		/** 按时间范围生成 ISO 起止。 */
 		function rangeOf(minutes) {
@@ -346,13 +387,17 @@ window.__ModuleLoader__.load({
 		//#region tabs
 		/** 日志 Tab。 */
 		function LogsTab({ onOpenTrace }) {
-			const [keyword, setKeyword] = useState('');
-			const [services, setServices] = useState('');
-			const [minutes, setMinutes] = useState(30);
+			const [keyword, setKeyword] = useState(memory.logs.keyword);
+			const [services, setServices] = useState(memory.logs.services);
+			const [minutes, setMinutes] = useState(memory.logs.minutes);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
-			const [result, setResult] = useState(null);
+			const [result, setResult] = useState(memory.logs.result);
 			const [expanded, setExpanded] = useState({});
+
+			useEffect(() => {
+				memory.logs = { keyword, services, minutes, result };
+			}, [keyword, services, minutes, result]);
 
 			const run = useCallback(async () => {
 				setLoading(true);
@@ -416,16 +461,19 @@ window.__ModuleLoader__.load({
 									open: expanded[idx] === true,
 									onToggle: () => setExpanded((prev) => ({ ...prev, [idx]: !(prev[idx] === true) })),
 									onOpenTrace,
-								}))),
-						h('div', { style: S.hint }, translate('hintNoLogin'))));
+								}))),));
 		}
 
 		/** 链路 Tab。 */
 		function TraceTab({ initialSerialNo, onConsumed }) {
-			const [serialNo, setSerialNo] = useState(initialSerialNo ?? '');
+			const [serialNo, setSerialNo] = useState(initialSerialNo ?? memory.trace.serialNo);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
-			const [detail, setDetail] = useState(null);
+			const [detail, setDetail] = useState(initialSerialNo ? null : memory.trace.detail);
+
+			useEffect(() => {
+				memory.trace = { serialNo, detail };
+			}, [serialNo, detail]);
 
 			const run = useCallback(async (target) => {
 				const value = String(target ?? serialNo).trim();
@@ -521,11 +569,15 @@ window.__ModuleLoader__.load({
 
 		/** 服务状态 Tab。 */
 		function StatusTab() {
-			const [service, setService] = useState('hall-restful');
-			const [minutes, setMinutes] = useState(60);
+			const [service, setService] = useState(memory.status.service);
+			const [minutes, setMinutes] = useState(memory.status.minutes);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
-			const [stats, setStats] = useState(null);
+			const [stats, setStats] = useState(memory.status.stats);
+
+			useEffect(() => {
+				memory.status = { service, minutes, stats };
+			}, [service, minutes, stats]);
 
 			const run = useCallback(async () => {
 				setLoading(true);
@@ -576,12 +628,79 @@ window.__ModuleLoader__.load({
 									h('span', { style: { ...S.chip, color: COLORS.error } }, `${item.count}×`),
 									h('span', { style: { ...S.mono, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, String(item.message ?? '')))))));
 		}
+		/** 操作日志 Tab：查看本插件自己的调用历史。 */
+		function AuditTab() {
+			const [items, setItems] = useState(memory.audit.items);
+			const [loading, setLoading] = useState(false);
+			const [error, setError] = useState('');
+
+			const load = useCallback(async () => {
+				setLoading(true);
+				setError('');
+				try {
+					const res = await callRpc('audit', { limit: 200 });
+					setItems(Array.isArray(res.items) ? res.items : []);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				} finally {
+					setLoading(false);
+				}
+			}, []);
+
+			useEffect(() => {
+				memory.audit = { items };
+			}, [items]);
+
+			useEffect(() => {
+				if (items === null) load();
+			}, []);
+
+			const cell = (width, extra) => ({ ...S.mono, flexShrink: 0, width, ...extra });
+
+			return h('div', null,
+				h('div', { style: S.form },
+					h('button', { style: S.button(true), onClick: load, disabled: loading, type: 'button' },
+						loading ? translate('searching') : translate('refresh')),
+					h('span', { style: { fontSize: 11, color: COLORS.label2, alignSelf: 'center' } }, translate('auditHint'))),
+				h(ErrorBox, { message: error }),
+				items === null
+					? h('div', { style: S.empty }, translate('empty'))
+					: (items.length === 0
+						? h('div', { style: S.empty }, translate('noAudit'))
+						: h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
+							items.map((item, idx) => h('div', {
+								key: idx,
+								style: { ...S.row, gap: 10 },
+							},
+								h('span', { style: cell(140, { color: COLORS.label2 }) }, String(item.time ?? '').slice(0, 19).replace('T', ' ')),
+								h('span', { style: { ...S.chip, flexShrink: 0, minWidth: 44, textAlign: 'center' } }, item.source === 'panel' ? translate('sourcePanel') : translate('sourceTool')),
+								h('span', { style: cell(96, null) }, String(item.action ?? '')),
+								h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, String(item.params ?? '') || '—'),
+								h('span', { style: cell(64, { textAlign: 'right', color: COLORS.label2 }) }, item.durationMs === undefined ? '—' : `${item.durationMs}ms`),
+								h('span', {
+									style: { fontSize: 11, width: 110, flexShrink: 0, textAlign: 'right', color: item.ok ? COLORS.success : COLORS.error },
+								}, item.ok ? translate('okLabel') : `${translate('failLabel')} ${String(item.error ?? '').slice(0, 18)}`))))));
+		}
+
 		//#endregion
 
 		//#region shell
 		/** 主面板：三个 Tab。 */
 		function MainPanel() {
-			const [tab, setTab] = useState('logs');
+			const [tab, setTab] = useState(memory.tab);
+			const [health, setHealth] = useState(null);
+
+			useEffect(() => {
+				memory.tab = tab;
+			}, [tab]);
+
+			useEffect(() => {
+				let alive = true;
+				callRpc('ping', {})
+					.then(() => { if (alive) setHealth({ ok: true }); })
+					.catch((e) => { if (alive) setHealth({ ok: false, reason: String(e?.message ?? e) }); });
+				return () => { alive = false; };
+			}, []);
 			const [pendingTrace, setPendingTrace] = useState('');
 
 			const openTrace = useCallback((serialNo) => {
@@ -594,8 +713,17 @@ window.__ModuleLoader__.load({
 			return h('div', { style: S.root },
 				h('div', { style: S.header },
 					h('span', { style: S.title }, translate('title')),
+					health === null
+						? null
+						: h('span', {
+							style: {
+								...S.chip,
+								color: health.ok ? COLORS.success : COLORS.error,
+								marginRight: 8,
+							},
+						}, health.ok ? translate('connected') : `${translate('disconnected')}：${String(health.reason ?? '').slice(0, 60)}`),
 					h('div', { style: S.tabs },
-						[['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus']].map(([key, labelKey]) =>
+						[['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
 							h('button', {
 								key,
 								style: S.tab(tab === key),
@@ -605,7 +733,8 @@ window.__ModuleLoader__.load({
 				h('div', { style: S.body },
 					tab === 'logs' ? h(LogsTab, { onOpenTrace: openTrace }) : null,
 					tab === 'trace' ? h(TraceTab, { initialSerialNo: pendingTrace, onConsumed: consumePending }) : null,
-					tab === 'status' ? h(StatusTab, null) : null));
+					tab === 'status' ? h(StatusTab, null) : null,
+					tab === 'audit' ? h(AuditTab, null) : null));
 		}
 
 		/** 侧边栏图标。 */
