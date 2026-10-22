@@ -66,8 +66,11 @@ export function buildKeywords(uri) {
   if (trimmed === '') return [];
   const noLeading = trimmed.replace(/^\/+/, '');
   const segments = trimmed.split('/').filter((part) => part !== '');
-  const tail = segments.length >= 2 ? segments.slice(-2).join('/') : (segments[segments.length - 1] ?? '');
-  return [...new Set([trimmed, noLeading, tail].filter((item) => item !== ''))];
+  const tails = [];
+  for (const size of [4, 3, 2]) {
+    if (segments.length >= size) tails.push(segments.slice(-size).join('/'));
+  }
+  return [...new Set([trimmed, noLeading, ...tails].filter((item) => item !== ''))];
 }
 
 /**
@@ -75,12 +78,29 @@ export function buildKeywords(uri) {
  * @param {Array<{file: string, line: number, text: string}>} hits 命中列表
  * @returns {{file: string, line: number, text: string} | null} 选中项
  */
-export function pickEndpoint(hits) {
+export function pickEndpoint(hits, uri = '') {
   if (!Array.isArray(hits) || hits.length === 0) return null;
   const annotated = hits.filter((hit) => /Mapping\(|RequestMapping|PostMapping|GetMapping/.test(hit.text));
   const pool = annotated.length > 0 ? annotated : hits;
-  const controller = pool.filter((hit) => hit.file.includes('Controller'));
-  return (controller.length > 0 ? controller : pool)[0] ?? null;
+  const controllers = pool.filter((hit) => hit.file.includes('Controller'));
+  const candidates = controllers.length > 0 ? controllers : pool;
+
+  // 用 URI 里的路径词给候选打分，避免选到只是恰巧含相同尾段的其它 Controller
+  const tokens = String(uri)
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 4);
+  const scoreOf = (hit) => tokens.filter((token) => hit.file.toLowerCase().includes(token)).length;
+  let best = candidates[0];
+  let bestScore = scoreOf(best);
+  for (const hit of candidates) {
+    const score = scoreOf(hit);
+    if (score > bestScore) {
+      best = hit;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 /**
@@ -90,24 +110,39 @@ export function pickEndpoint(hits) {
  * @param {string} varName 变量名或接口名
  * @returns {string | null} 文件绝对路径
  */
+/** 每个仓库只遍历一次 Java 文件清单，后续匹配走内存。 */
+const javaFileCache = new Map();
+
+/**
+ * 取仓库内全部 Java 文件（排除测试目录），带缓存。
+ * @param {string} root 仓库根目录
+ * @returns {string[]} 文件绝对路径列表
+ */
+export function listJavaFiles(root) {
+  if (javaFileCache.has(root)) return javaFileCache.get(root);
+  let files = [];
+  try {
+    const out = execFileSync('find', [root, '-name', '*.java', '-not', '-path', '*/test/*'], {
+      encoding: 'utf8',
+      timeout: 25000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    files = out.split('\n').filter((file) => file.endsWith('.java'));
+  } catch {
+    files = [];
+  }
+  javaFileCache.set(root, files);
+  return files;
+}
+
 export function findClassFile(root, varName) {
   if (typeof varName !== 'string' || varName === '') return null;
   const base = varName.replace(/^I(?=[A-Z])/, '').replace(/Service$/, '');
   const camel = base.charAt(0).toUpperCase() + base.slice(1);
   if (camel === '') return null;
-  try {
-    const out = execFileSync('find', [root, '-name', `*${camel}*Service.java`, '-not', '-path', '*/test/*'], {
-      encoding: 'utf8',
-      timeout: 15000,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    const files = out.split('\n').filter((file) => file.endsWith('.java'));
-    // 优先非抽象、非接口的实现类
-    const impl = files.find((file) => /(Impl|Service)\.java$/.test(file) && !/Abstract/.test(file));
-    return impl ?? files[0] ?? null;
-  } catch {
-    return null;
-  }
+  const files = listJavaFiles(root).filter((file) => file.includes(camel));
+  const impl = files.find((file) => /(Impl|Service)\.java$/.test(file) && !/Abstract/.test(file));
+  return impl ?? files[0] ?? null;
 }
 
 /**
@@ -129,4 +164,59 @@ export function extractServiceVars(snippet) {
     if (names.size >= 10) break;
   }
   return [...names];
+}
+
+/**
+ * 提取代码里声明的 Lisa/Dubbo 服务名（@LisaService(name = "...")）。
+ * @param {string} snippet 代码片段
+ * @returns {string[]} 服务名列表
+ */
+export function extractLisaNames(snippet) {
+  const names = new Set();
+  const pattern = /@LisaService\s*\(\s*name\s*=\s*"([^"]+)"/g;
+  let matched;
+  while ((matched = pattern.exec(snippet)) !== null) {
+    names.add(matched[1]);
+    if (names.size >= 6) break;
+  }
+  return [...names];
+}
+
+/**
+ * 从服务名推导可搜索的短名，用于定位生成配置或实现类。
+ * hall_app_newShareListInfoQryEntranceService → newShareListInfoQryEntranceService
+ * @param {string} name 完整服务名
+ * @returns {string} 短名
+ */
+export function shortServiceName(name) {
+  return String(name ?? '').replace(/^hall_(app|user|acct|biz)_/, '');
+}
+
+/**
+ * 一次搜索多个关键字，避免重复遍历仓库。
+ * @param {string} root 仓库根目录
+ * @param {string[]} keywords 关键字列表
+ * @param {number} limit 最多返回条数
+ * @returns {Array<{file: string, line: number, text: string}>} 命中列表
+ */
+export function searchJavaMany(root, keywords, limit = 30) {
+  if (typeof root !== 'string' || root === '' || !existsSync(root)) return [];
+  const usable = keywords.filter((item) => typeof item === 'string' && item.trim() !== '');
+  if (usable.length === 0) return [];
+  try {
+    const out = execFileSync('grep', ['-rn', '--include=*.java', '-F', ...usable.flatMap((k) => ['-e', k]), root], {
+      encoding: 'utf8',
+      timeout: 25000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const hits = [];
+    for (const line of out.split('\n')) {
+      if (hits.length >= limit) break;
+      const matched = line.match(/^(.+?):(\d+):(.*)$/);
+      if (matched !== null) hits.push({ file: matched[1], line: Number(matched[2]), text: matched[3].trim() });
+    }
+    return hits;
+  } catch {
+    return [];
+  }
 }

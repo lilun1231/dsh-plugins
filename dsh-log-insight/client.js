@@ -1098,6 +1098,23 @@ window.__ModuleLoader__.load({
 			return null;
 		}
 
+		/** 按字符数折行，超出部分用省略号收尾。 */
+		function wrapText(text, maxChars, maxLines = 2) {
+			const source = String(text ?? '');
+			const lines = [];
+			let rest = source;
+			while (rest.length > 0 && lines.length < maxLines) {
+				if (rest.length <= maxChars) {
+					lines.push(rest);
+					break;
+				}
+				lines.push(rest.slice(0, maxChars));
+				rest = rest.slice(maxChars);
+			}
+			if (rest.length > 0 && lines.length > 0) lines[lines.length - 1] += '…';
+			return lines.length === 0 ? [''] : lines;
+		}
+
 		/** 把 Mermaid 时序图渲染为可点击的 SVG。 */
 		function SequenceDiagram({ mermaid, endpoints, onOpenLogs }) {
 			const parsed = useMemo(() => parseMermaid(mermaid), [mermaid]);
@@ -1122,8 +1139,11 @@ window.__ModuleLoader__.load({
 						y += 8;
 						continue;
 					}
+					const isNote = item.type === 'note';
+					item.lines = wrapText(item.text, isNote ? 58 : 46, isNote ? 3 : 2);
+					item.h = isNote ? 14 + item.lines.length * 13 : item.lines.length * 14 + 24;
 					item.y = y;
-					y += 38;
+					y += item.h;
 				}
 			};
 			walk(parsed.items, 0);
@@ -1207,23 +1227,26 @@ window.__ModuleLoader__.load({
 					const xs = keys.map((key) => columnX(key));
 					const left = Math.min(...xs) - 60;
 					const right = Math.max(...xs) + 60;
+					const boxLeft = Math.max(6, left);
 					nodes.push(h('rect', {
 						key: `n${nodes.length}`,
-						x: Math.max(6, left),
-						y: item.y - 14,
-						width: Math.min(width - 12, right) - Math.max(6, left),
-						height: 26,
+						x: boxLeft,
+						y: item.y - 2,
+						width: Math.min(width - 12, right) - boxLeft,
+						height: item.h - 6,
 						rx: 4,
 						fill: 'rgba(250,204,21,0.16)',
 						stroke: 'rgba(250,204,21,0.5)',
 					}));
-					nodes.push(h('text', {
-						key: `nt${nodes.length}`,
-						x: Math.max(6, left) + 8,
-						y: item.y + 3,
-						fontSize: 10.5,
-						fill: COLORS.label1,
-					}, item.text.length > 90 ? `${item.text.slice(0, 89)}…` : item.text));
+					item.lines.forEach((lineText, lineIdx) => {
+						nodes.push(h('text', {
+							key: `nt${nodes.length}-${lineIdx}`,
+							x: boxLeft + 8,
+							y: item.y + 12 + lineIdx * 13,
+							fontSize: 10.5,
+							fill: COLORS.label1,
+						}, lineText.length > 76 ? `${lineText.slice(0, 75)}…` : lineText));
+					});
 					continue;
 				}
 				if (item.type === 'text') continue;
@@ -1234,12 +1257,13 @@ window.__ModuleLoader__.load({
 				const endpoint = matchEndpoint(item.text, endpoints);
 				const color = endpoint === null ? COLORS.label1 : COLORS.brand;
 				const marker = item.dashed ? 'url(#arrow-open)' : 'url(#arrow-solid)';
+				// 文字在上方多行排列，箭头压在下方，两者不再重叠
+				const arrowY = item.y + item.h - 9;
 
 				if (same) {
-					// 自调用：画一个回环
 					nodes.push(h('path', {
 						key: `m${nodes.length}`,
-						d: `M ${fromX} ${item.y - 10} h 46 v 22 h -46`,
+						d: `M ${fromX} ${arrowY - 14} h 42 v 16 h -42`,
 						fill: 'none',
 						stroke: color,
 						strokeWidth: endpoint === null ? 1 : 1.6,
@@ -1250,9 +1274,9 @@ window.__ModuleLoader__.load({
 					nodes.push(h('line', {
 						key: `m${nodes.length}`,
 						x1: fromX,
-						y1: item.y - 6,
+						y1: arrowY,
 						x2: toX,
-						y2: item.y - 6,
+						y2: arrowY,
 						stroke: color,
 						strokeWidth: endpoint === null ? 1 : 1.6,
 						strokeDasharray: item.dashed ? '4 3' : undefined,
@@ -1260,22 +1284,21 @@ window.__ModuleLoader__.load({
 					}));
 				}
 
-				const label = item.text.length > 62 ? `${item.text.slice(0, 61)}…` : item.text;
-				const textY = item.y - 12;
-				const centerX = same ? fromX + 52 : (fromX + toX) / 2;
-				const textNode = h('text', {
-					key: `mt${nodes.length}`,
-					x: centerX,
-					y: textY,
-					textAnchor: same ? 'start' : 'middle',
-					fontSize: 10.5,
-					fill: color,
-					fontWeight: endpoint === null ? 400 : 700,
-					textDecoration: endpoint === null ? 'none' : 'underline',
-					style: endpoint === null ? undefined : { cursor: 'pointer' },
-					onClick: endpoint === null ? undefined : () => onOpenLogs(endpoint.uri),
-				}, label);
-				nodes.push(textNode);
+				const centerX = same ? fromX + 50 : (fromX + toX) / 2;
+				item.lines.forEach((lineText, lineIdx) => {
+					nodes.push(h('text', {
+						key: `mt${nodes.length}-${lineIdx}`,
+						x: same ? fromX + 6 : centerX,
+						y: item.y + 11 + lineIdx * 14,
+						textAnchor: same ? 'start' : 'middle',
+						fontSize: 10.5,
+						fill: color,
+						fontWeight: endpoint === null ? 400 : 700,
+						textDecoration: endpoint === null ? 'none' : 'underline',
+						style: endpoint === null ? undefined : { cursor: 'pointer' },
+						onClick: endpoint === null ? undefined : () => onOpenLogs(endpoint.uri),
+					}, lineText));
+				});
 			}
 
 			return h('div', { style: { overflowX: 'auto', border: `1px solid ${COLORS.border1}`, borderRadius: 8, background: COLORS.layer1 } },

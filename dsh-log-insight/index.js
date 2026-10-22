@@ -9,7 +9,7 @@ import { searchCallChains, aggregateServiceStatus } from './lib/governance-query
 import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.js';
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
 import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
-import { searchJava, readSnippet, buildKeywords, pickEndpoint, findClassFile, extractServiceVars } from './lib/code-scan.js';
+import { searchJava, searchJavaMany, readSnippet, buildKeywords, pickEndpoint, findClassFile, extractServiceVars, extractLisaNames, shortServiceName } from './lib/code-scan.js';
 
 export const name = 'log-insight';
 // llm 用于自然语言问答；tools 提供工具注册，connection 提供 Web RPC
@@ -348,34 +348,54 @@ export function apply(ctx, config) {
    * @param {string} uri 接口路径
    * @returns {{endpoint: object | null, context: string}} 定位结果与上下文
    */
-  function collectContext(repoPath, uri, maxFiles = 8) {
+  function collectContext(repoPath, uri, maxFiles = 9) {
     for (const keyword of buildKeywords(uri)) {
-      const picked = pickEndpoint(searchJava(repoPath, keyword));
+      const picked = pickEndpoint(searchJava(repoPath, keyword), uri);
       if (picked === null) continue;
 
       const parts = [];
       const seen = new Set();
-      const push = (file, snippet, label) => {
-        if (seen.has(file) || parts.length >= maxFiles) return false;
-        seen.add(file);
+      const push = (file, snippet, label, line = 0) => {
+        if (file.includes('/test/')) return false;
+        const key = `${file}:${Math.floor(line / 40)}`;
+        if (seen.has(key) || parts.length >= maxFiles) return false;
+        seen.add(key);
         parts.push(`### ${label}：${file.replace(repoPath, '')}\n${snippet}`);
         return true;
       };
 
-      // 第 0 层：Controller 入口方法
-      const entry = readSnippet(picked.file, picked.line, 8, 110);
+      // 第 0 层：类头部（含 @LisaService 字段注入）+ 入口方法
+      const head = readSnippet(picked.file, 1, 0, 60);
+      const method = readSnippet(picked.file, picked.line, 8, 110);
+      const entry = { snippet: `${head.snippet}\n\n// ...（省略中间代码）...\n\n${method.snippet}` };
       push(picked.file, entry.snippet, 'Controller 入口');
 
-      // 逐层向下追踪：按被调用的服务变量名定位实现类
+      // 第 1 层：按 @LisaService(name) 找服务定义，这类工程常用 @Bean 配置类生成实现
+      const lisaShorts = extractLisaNames(entry.snippet).slice(0, 4).map((fullName) => shortServiceName(fullName));
+      if (lisaShorts.length > 0) {
+        for (const hit of searchJavaMany(repoPath, lisaShorts, 16)) {
+          if (!/@Bean|@LisaService|class /.test(hit.text)) continue;
+          const matchedName = lisaShorts.find((name) => hit.text.includes(name)) ?? 'service';
+          push(hit.file, readSnippet(hit.file, hit.line, 30, 90).snippet, `服务定义 ${matchedName}`, hit.line);
+        }
+      }
+
+      // 第 2 层：继续按被调用的服务变量名定位实现类
       let frontier = extractServiceVars(entry.snippet);
       for (let depth = 0; depth < 3 && frontier.length > 0 && parts.length < maxFiles; depth++) {
         const next = [];
         for (const name of frontier) {
           const file = findClassFile(repoPath, name);
           if (file === null || seen.has(file)) continue;
-          const snippet = readSnippet(file, 1, 0, 110);
-          if (!push(file, snippet.snippet, `第 ${depth + 1} 层`)) continue;
+          const snippet = readSnippet(file, 1, 0, 100);
+          if (!push(file, snippet.snippet, `第 ${depth + 1} 层服务`, 1)) continue;
           next.push(...extractServiceVars(snippet.snippet));
+          const deeper = extractLisaNames(snippet.snippet).slice(0, 2).map((fullName) => shortServiceName(fullName));
+          if (deeper.length > 0) {
+            for (const hit of searchJavaMany(repoPath, deeper, 6)) {
+              push(hit.file, readSnippet(hit.file, hit.line, 20, 70).snippet, '下游服务定义', hit.line);
+            }
+          }
         }
         frontier = next;
       }
@@ -430,7 +450,7 @@ export function apply(ctx, config) {
       if (endpoint === null) {
         return { ok: false, reason: `在 ${project} 里没有找到接口 ${uri}，请检查项目或路径` };
       }
-      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 26000)].join('\n');
+      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 40000)].join('\n');
       const analysis = parseAnalysis(await callModel(ANALYZE_PROMPT, prompt));
       return {
         ok: true,
