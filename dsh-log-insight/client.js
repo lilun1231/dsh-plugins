@@ -1001,6 +1001,285 @@ window.__ModuleLoader__.load({
 								}, item.ok ? translate('okLabel') : `${translate('failLabel')} ${String(item.error ?? '').slice(0, 18)}`))))));
 		}
 
+		/** 解析 Mermaid sequenceDiagram 的常用语法子集。 */
+		function parseMermaid(text) {
+			const participants = [];
+			const items = [];
+			const stack = [];
+
+			const pushItem = (item) => {
+				if (stack.length === 0) items.push(item);
+				else stack[stack.length - 1].items.push(item);
+			};
+
+			for (const raw of String(text ?? '').split('\n')) {
+				const line = raw.trim();
+				if (line === '' || line.startsWith('%%')) continue;
+				if (/^sequenceDiagram/i.test(line) || /^autonumber/i.test(line)) continue;
+
+				const participant = line.match(/^participant\s+([^\s]+)(?:\s+as\s+(.+))?$/i);
+				if (participant !== null) {
+					participants.push({ key: participant[1], label: (participant[2] ?? participant[1]).trim() });
+					continue;
+				}
+				const note = line.match(/^Note\s+(?:over|left of|right of)\s+([^:]+):\s*(.+)$/i);
+				if (note !== null) {
+					pushItem({ type: 'note', target: note[1].trim(), text: note[2].trim() });
+					continue;
+				}
+				const par = line.match(/^par\s*(.*)$/i);
+				if (par !== null) {
+					const group = { type: 'group', label: (par[1] ?? '').trim(), items: [] };
+					pushItem(group);
+					stack.push(group);
+					continue;
+				}
+				const and = line.match(/^and\s*(.*)$/i);
+				if (and !== null && stack.length > 0) {
+					const group = { type: 'group', label: (and[1] ?? '').trim(), items: [] };
+					stack[stack.length - 1].items.push(group);
+					stack.push(group);
+					continue;
+				}
+				if (/^end$/i.test(line)) {
+					stack.pop();
+					continue;
+				}
+				const message = line.match(/^([A-Za-z0-9_]+)\s*(-->>|->>|-->|->)\s*([A-Za-z0-9_]+)\s*:\s*(.*)$/);
+				if (message !== null) {
+					pushItem({
+						type: 'message',
+						from: message[1],
+						to: message[3],
+						text: message[4].trim(),
+						dashed: message[2].startsWith('--'),
+					});
+					continue;
+				}
+				pushItem({ type: 'text', text: line });
+			}
+			return { participants, items };
+		}
+
+		/** 判断某段消息文字是否对应可查日志的接口。 */
+		function matchEndpoint(text, endpoints) {
+			if (typeof text !== 'string' || text === '') return null;
+			for (const endpoint of endpoints) {
+				const candidates = [endpoint.label, endpoint.uri].filter((item) => typeof item === 'string' && item !== '');
+				if (candidates.some((item) => text.includes(item))) return endpoint;
+			}
+			return null;
+		}
+
+		/** 把 Mermaid 时序图渲染为可点击的 SVG。 */
+		function SequenceDiagram({ mermaid, endpoints, onOpenLogs }) {
+			const parsed = useMemo(() => parseMermaid(mermaid), [mermaid]);
+			const participants = parsed.participants;
+			if (participants.length === 0) return null;
+
+			const n = participants.length;
+			const width = Math.max(760, n * 165);
+			const step = width / n;
+			const indexOf = new Map(participants.map((item, idx) => [item.key, idx]));
+			const columnX = (key) => (indexOf.has(key) ? (indexOf.get(key) + 0.5) * step : step / 2);
+
+			const groupRects = [];
+			let y = 74;
+			const walk = (items, depth) => {
+				for (const item of items) {
+					if (item.type === 'group') {
+						const top = y;
+						y += 22;
+						walk(item.items, depth + 1);
+						groupRects.push({ label: item.label, top, bottom: y + 4, depth });
+						y += 8;
+						continue;
+					}
+					item.y = y;
+					y += 38;
+				}
+			};
+			walk(parsed.items, 0);
+			const height = y + 24;
+
+			const nodes = [];
+			for (const rect of groupRects) {
+				nodes.push(h('rect', {
+					key: `g${nodes.length}`,
+					x: 6,
+					y: rect.top,
+					width: width - 12,
+					height: rect.bottom - rect.top,
+					rx: 6,
+					fill: rect.depth === 0 ? 'rgba(99,102,241,0.05)' : 'rgba(99,102,241,0.09)',
+					stroke: 'rgba(99,102,241,0.35)',
+					strokeDasharray: '4 3',
+				}));
+				if (rect.label !== '') {
+					nodes.push(h('text', {
+						key: `gl${nodes.length}`,
+						x: 14,
+						y: rect.top + 15,
+						fontSize: 11,
+						fontWeight: 600,
+						fill: COLORS.brand,
+					}, rect.label));
+				}
+			}
+
+			for (const item of parsed.items) {
+				// 生命线由参与者列统一绘制，这里只画消息
+				void item;
+			}
+
+			participants.forEach((item, idx) => {
+				const cx = columnX(item.key);
+				nodes.push(h('rect', {
+					key: `p${idx}`,
+					x: cx - 72,
+					y: 12,
+					width: 144,
+					height: 40,
+					rx: 6,
+					fill: COLORS.layer2,
+					stroke: COLORS.border1,
+				}));
+				const plain = String(item.label).replace(/<br\s*\/?>/gi, ' ').replace(/\s+/g, ' ').trim();
+				nodes.push(h('text', {
+					key: `pt${idx}`,
+					x: cx,
+					y: 30,
+					textAnchor: 'middle',
+					fontSize: 11,
+					fontWeight: 600,
+					fill: COLORS.label1,
+				}, plain.length > 20 ? `${plain.slice(0, 19)}…` : plain));
+				nodes.push(h('line', {
+					key: `pl${idx}`,
+					x1: cx,
+					y1: 52,
+					x2: cx,
+					y2: height - 12,
+					stroke: COLORS.border1,
+					strokeDasharray: '3 4',
+				}));
+			});
+
+			const flat = [];
+			const flatten = (items) => {
+				for (const item of items) {
+					if (item.type === 'group') flatten(item.items);
+					else flat.push(item);
+				}
+			};
+			flatten(parsed.items);
+
+			for (const item of flat) {
+				if (item.type === 'note') {
+					const keys = item.target.split(',').map((part) => part.trim());
+					const xs = keys.map((key) => columnX(key));
+					const left = Math.min(...xs) - 60;
+					const right = Math.max(...xs) + 60;
+					nodes.push(h('rect', {
+						key: `n${nodes.length}`,
+						x: Math.max(6, left),
+						y: item.y - 14,
+						width: Math.min(width - 12, right) - Math.max(6, left),
+						height: 26,
+						rx: 4,
+						fill: 'rgba(250,204,21,0.16)',
+						stroke: 'rgba(250,204,21,0.5)',
+					}));
+					nodes.push(h('text', {
+						key: `nt${nodes.length}`,
+						x: Math.max(6, left) + 8,
+						y: item.y + 3,
+						fontSize: 10.5,
+						fill: COLORS.label1,
+					}, item.text.length > 90 ? `${item.text.slice(0, 89)}…` : item.text));
+					continue;
+				}
+				if (item.type === 'text') continue;
+
+				const fromX = columnX(item.from);
+				const toX = columnX(item.to);
+				const same = Math.abs(fromX - toX) < 1;
+				const endpoint = matchEndpoint(item.text, endpoints);
+				const color = endpoint === null ? COLORS.label1 : COLORS.brand;
+				const marker = item.dashed ? 'url(#arrow-open)' : 'url(#arrow-solid)';
+
+				if (same) {
+					// 自调用：画一个回环
+					nodes.push(h('path', {
+						key: `m${nodes.length}`,
+						d: `M ${fromX} ${item.y - 10} h 46 v 22 h -46`,
+						fill: 'none',
+						stroke: color,
+						strokeWidth: endpoint === null ? 1 : 1.6,
+						strokeDasharray: item.dashed ? '4 3' : undefined,
+						markerEnd: marker,
+					}));
+				} else {
+					nodes.push(h('line', {
+						key: `m${nodes.length}`,
+						x1: fromX,
+						y1: item.y - 6,
+						x2: toX,
+						y2: item.y - 6,
+						stroke: color,
+						strokeWidth: endpoint === null ? 1 : 1.6,
+						strokeDasharray: item.dashed ? '4 3' : undefined,
+						markerEnd: marker,
+					}));
+				}
+
+				const label = item.text.length > 62 ? `${item.text.slice(0, 61)}…` : item.text;
+				const textY = item.y - 12;
+				const centerX = same ? fromX + 52 : (fromX + toX) / 2;
+				const textNode = h('text', {
+					key: `mt${nodes.length}`,
+					x: centerX,
+					y: textY,
+					textAnchor: same ? 'start' : 'middle',
+					fontSize: 10.5,
+					fill: color,
+					fontWeight: endpoint === null ? 400 : 700,
+					textDecoration: endpoint === null ? 'none' : 'underline',
+					style: endpoint === null ? undefined : { cursor: 'pointer' },
+					onClick: endpoint === null ? undefined : () => onOpenLogs(endpoint.uri),
+				}, label);
+				nodes.push(textNode);
+			}
+
+			return h('div', { style: { overflowX: 'auto', border: `1px solid ${COLORS.border1}`, borderRadius: 8, background: COLORS.layer1 } },
+				h('svg', {
+					width,
+					height,
+					viewBox: `0 0 ${width} ${height}`,
+					style: { display: 'block' },
+				},
+					h('defs', null,
+						h('marker', {
+							id: 'arrow-solid',
+							viewBox: '0 0 10 10',
+							refX: 9,
+							refY: 5,
+							markerWidth: 7,
+							markerHeight: 7,
+							orient: 'auto',
+						}, h('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: 'currentColor' })),
+						h('marker', {
+							id: 'arrow-open',
+							viewBox: '0 0 10 10',
+							refX: 9,
+							refY: 5,
+							markerWidth: 7,
+							markerHeight: 7,
+							orient: 'auto',
+						}, h('path', { d: 'M 0 0 L 10 5 L 0 10', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }))),
+					nodes));
+		}
+
 		/** 接口分析 Tab：选定项目与接口，定位代码后生成调用时序。 */
 		function AnalyzeTab({ onOpenLogs }) {
 			const [project, setProject] = useState(memory.analyze.project);
@@ -1034,47 +1313,14 @@ window.__ModuleLoader__.load({
 				h('div', { style: { ...S.mono, fontSize: 11, color: COLORS.label2, marginTop: 6 } },
 					`${data.project ?? ''} · ${data.source?.file ?? ''}:${data.source?.line ?? ''}`));
 
-			const steps = data === null || !Array.isArray(data.steps) ? [] : data.steps;
+			const endpoints = data === null || !Array.isArray(data.endpoints) ? [] : data.endpoints;
 			const sequence = data === null ? null : h('div', null,
 				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' } },
 					h('span', { style: S.chip }, translate('sequenceTitle')),
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('clickToSearch'))),
-				steps.length === 0
-					? h('div', { style: S.empty }, translate('noResult'))
-					: h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
-						steps.map((step, idx) => {
-							const linkable = typeof step.uri === 'string' && step.uri !== '';
-							return h('div', {
-								key: idx,
-								style: { ...S.row, gap: 8, alignItems: 'center' },
-							},
-								h('span', { style: { ...S.mono, color: COLORS.label2, width: 20, flexShrink: 0 } }, String(step.seq)),
-								h('span', { style: { ...S.mono, flexShrink: 0, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.from),
-								h('span', { style: { color: COLORS.label2, flexShrink: 0 } }, '→'),
-								h('span', { style: { ...S.mono, flexShrink: 0, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.to),
-								linkable
-									? h('button', {
-										type: 'button',
-										onClick: () => onOpenLogs(step.uri),
-										style: {
-											background: 'none',
-											border: 'none',
-											padding: 0,
-											cursor: 'pointer',
-											color: COLORS.brand,
-											fontWeight: 700,
-											fontSize: 12,
-											textAlign: 'left',
-											textDecoration: 'underline',
-											flex: 1,
-											overflow: 'hidden',
-											textOverflow: 'ellipsis',
-											whiteSpace: 'nowrap',
-										},
-									}, step.label)
-									: h('span', { style: { ...S.mono, flex: 1, color: COLORS.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, step.label),
-								step.note === '' ? null : h('span', { style: { fontSize: 11, color: COLORS.label2, flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.note));
-						})));
+				typeof data.mermaid === 'string' && data.mermaid !== ''
+					? h(SequenceDiagram, { mermaid: data.mermaid, endpoints, onOpenLogs })
+					: h('div', { style: S.empty }, translate('noResult')));
 
 			return h('div', null,
 				h('div', { style: S.form },

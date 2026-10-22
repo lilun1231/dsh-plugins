@@ -9,7 +9,7 @@ import { searchCallChains, aggregateServiceStatus } from './lib/governance-query
 import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.js';
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
 import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
-import { searchJava, readSnippet, buildKeywords, pickEndpoint } from './lib/code-scan.js';
+import { searchJava, readSnippet, buildKeywords, pickEndpoint, findClassFile, extractServiceVars } from './lib/code-scan.js';
 
 export const name = 'log-insight';
 // llm 用于自然语言问答；tools 提供工具注册，connection 提供 Web RPC
@@ -298,25 +298,33 @@ export function apply(ctx, config) {
 
   /** 接口分析提示词。 */
   const ANALYZE_PROMPT = [
-    '你是 Java 后端架构师。根据给定代码分析接口的执行逻辑，输出时序步骤。',
+    '你是 Java 后端架构师。根据给定代码分析接口的执行逻辑，画成 Mermaid 时序图。',
     '',
-    '只输出 JSON，不要任何解释，格式如下：',
+    '只输出 JSON，不要解释，格式：',
     '{',
     '  "title": "接口用途，一句话",',
     '  "summary": "两三句话说明业务逻辑",',
-    '  "steps": [',
-    '    {"from":"客户端","to":"hall-restful","label":"POST /rest/app/trade/sqnews/likestate/update","kind":"http","uri":"/rest/app/trade/sqnews/likestate/update","note":"接口入口"},',
-    '    {"from":"SQNewsController","to":"ISQNewsDetailLikeStateUpdateService","label":"updateSqNewsLikeState()","kind":"service","note":"Lisa RPC 调用"},',
-    '    {"from":"SQNewsDetailLikeStateUpdateServiceImpl","to":"数据库","label":"更新点赞状态","kind":"dao","note":""}',
+    '  "mermaid": "sequenceDiagram\\n    autonumber\\n    participant App as 优理宝App\\n    participant CTRL as XxxController\\n    App->>CTRL: GET /homepage/info/qry 带 stockcode\\n    CTRL->>SVC: qryColumnList(param)\\n    SVC-->>CTRL: 列表\\n    CTRL-->>App: RespBodyInfo",',
+    '  "endpoints": [',
+    '    {"label":"GET /homepage/info/qry","uri":"/homepage/info/qry","kind":"http"},',
+    '    {"label":"TC 141.189 个股异动解读","uri":"141.189","kind":"middle"}',
     '  ]',
     '}',
     '',
-    '规则：',
-    '- 第一步固定是客户端调用该接口，kind 用 http，uri 填完整接口路径（含 Controller 上的类级前缀，如 /rest/...）',
-    '- 之后按调用顺序列出 Controller → Service → DAO 或外部系统',
-    '- 调用了其他系统的 HTTP 接口时用 kind=external，并在 uri 里给出该接口路径',
-    '- 代码里没有依据的步骤不要编造；不确定时把 note 写成「需结合实现确认」',
-  ].join('\n');
+    'Mermaid 要求：',
+    '- 首行 sequenceDiagram，第二行 autonumber',
+    '- 用 participant 别名 as 中文说明；参与者要覆盖代码里出现的全部服务、外部系统与中台',
+    '- 调用用 ->>，返回用 -->>，并行调用用 par / and / end',
+    '- 关键判断、参数透传、字段变更、组装逻辑用 Note over 说明',
+    '- 中台调用（如 TC 141.189）单独作为 participant，并在 endpoints 里给出编码',
+    '- 消息文案里写清参数名、条件或字段，越具体越好',
+    '',
+    'endpoints 要求：',
+    '- 列出所有可查询日志的接口：HTTP 接口给完整路径（含类级前缀），中台接口给编码',
+    '- label 必须与 mermaid 里出现的文案保持一致，便于前端高亮',
+    '',
+    '规则：只写代码里有依据的调用，不要编造；不确定的地方用 Note 标注「需结合实现确认」。',
+  ].join('\\n');
 
   /**
    * 从代码片段里提取被注入的 Service 接口名。
@@ -340,19 +348,38 @@ export function apply(ctx, config) {
    * @param {string} uri 接口路径
    * @returns {{endpoint: object | null, context: string}} 定位结果与上下文
    */
-  function collectContext(repoPath, uri) {
+  function collectContext(repoPath, uri, maxFiles = 8) {
     for (const keyword of buildKeywords(uri)) {
       const picked = pickEndpoint(searchJava(repoPath, keyword));
       if (picked === null) continue;
-      const main = readSnippet(picked.file, picked.line, 10, 130);
-      const parts = [`### Controller：${picked.file.replace(repoPath, '')}\n${main.snippet}`];
-      for (const serviceName of extractServiceNames(main.snippet)) {
-        const implHits = searchJava(repoPath, `implements ${serviceName}`, 5);
-        if (implHits.length === 0) continue;
-        const impl = readSnippet(implHits[0].file, 1, 0, 90);
-        parts.push(`### Service 实现：${implHits[0].file.replace(repoPath, '')}\n${impl.snippet}`);
-        if (parts.length >= 3) break;
+
+      const parts = [];
+      const seen = new Set();
+      const push = (file, snippet, label) => {
+        if (seen.has(file) || parts.length >= maxFiles) return false;
+        seen.add(file);
+        parts.push(`### ${label}：${file.replace(repoPath, '')}\n${snippet}`);
+        return true;
+      };
+
+      // 第 0 层：Controller 入口方法
+      const entry = readSnippet(picked.file, picked.line, 8, 110);
+      push(picked.file, entry.snippet, 'Controller 入口');
+
+      // 逐层向下追踪：按被调用的服务变量名定位实现类
+      let frontier = extractServiceVars(entry.snippet);
+      for (let depth = 0; depth < 3 && frontier.length > 0 && parts.length < maxFiles; depth++) {
+        const next = [];
+        for (const name of frontier) {
+          const file = findClassFile(repoPath, name);
+          if (file === null || seen.has(file)) continue;
+          const snippet = readSnippet(file, 1, 0, 110);
+          if (!push(file, snippet.snippet, `第 ${depth + 1} 层`)) continue;
+          next.push(...extractServiceVars(snippet.snippet));
+        }
+        frontier = next;
       }
+
       return { endpoint: picked, context: parts.join('\n\n') };
     }
     return { endpoint: null, context: '' };
@@ -372,16 +399,17 @@ export function apply(ctx, config) {
     } catch {
       throw new Error('时序分析不是合法 JSON');
     }
-    const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
-      seq: index + 1,
-      from: String(step?.from ?? ''),
-      to: String(step?.to ?? ''),
-      label: String(step?.label ?? ''),
-      kind: String(step?.kind ?? 'service'),
-      uri: typeof step?.uri === 'string' ? step.uri : '',
-      note: typeof step?.note === 'string' ? step.note : '',
-    })) : [];
-    return { title: String(value.title ?? ''), summary: String(value.summary ?? ''), steps };
+    const endpoints = Array.isArray(value.endpoints) ? value.endpoints.map((item) => ({
+      label: String(item?.label ?? ''),
+      uri: String(item?.uri ?? ''),
+      kind: String(item?.kind ?? 'http'),
+    })).filter((item) => item.uri !== '') : [];
+    return {
+      title: String(value.title ?? ''),
+      summary: String(value.summary ?? ''),
+      mermaid: typeof value.mermaid === 'string' ? value.mermaid : '',
+      endpoints,
+    };
   }
 
   /**
@@ -402,7 +430,7 @@ export function apply(ctx, config) {
       if (endpoint === null) {
         return { ok: false, reason: `在 ${project} 里没有找到接口 ${uri}，请检查项目或路径` };
       }
-      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 12000)].join('\n');
+      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 26000)].join('\n');
       const analysis = parseAnalysis(await callModel(ANALYZE_PROMPT, prompt));
       return {
         ok: true,
@@ -410,7 +438,8 @@ export function apply(ctx, config) {
         uri,
         title: analysis.title,
         summary: analysis.summary,
-        steps: analysis.steps,
+        mermaid: analysis.mermaid,
+        endpoints: analysis.endpoints,
         source: { file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
       };
     } catch (error) {

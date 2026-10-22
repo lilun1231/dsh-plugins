@@ -82,3 +82,51 @@ export function pickEndpoint(hits) {
   const controller = pool.filter((hit) => hit.file.includes('Controller'));
   return (controller.length > 0 ? controller : pool)[0] ?? null;
 }
+
+/**
+ * 从变量名推测实现类文件名，并在仓库里定位它。
+ * 例如 hPageItemEntranceService → 搜 *HPageItemEntrance*Service.java。
+ * @param {string} root 仓库根目录
+ * @param {string} varName 变量名或接口名
+ * @returns {string | null} 文件绝对路径
+ */
+export function findClassFile(root, varName) {
+  if (typeof varName !== 'string' || varName === '') return null;
+  const base = varName.replace(/^I(?=[A-Z])/, '').replace(/Service$/, '');
+  const camel = base.charAt(0).toUpperCase() + base.slice(1);
+  if (camel === '') return null;
+  try {
+    const out = execFileSync('find', [root, '-name', `*${camel}*Service.java`, '-not', '-path', '*/test/*'], {
+      encoding: 'utf8',
+      timeout: 15000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const files = out.split('\n').filter((file) => file.endsWith('.java'));
+    // 优先非抽象、非接口的实现类
+    const impl = files.find((file) => /(Impl|Service)\.java$/.test(file) && !/Abstract/.test(file));
+    return impl ?? files[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从代码片段提取被调用的服务变量名与注入的接口名。
+ * @param {string} snippet 代码片段
+ * @returns {string[]} 变量名/接口名列表
+ */
+export function extractServiceVars(snippet) {
+  const names = new Set();
+  const called = /\b(\w+Service)\.(\w+)\(/g;
+  let matched;
+  while ((matched = called.exec(snippet)) !== null) {
+    names.add(matched[1]);
+    if (names.size >= 6) break;
+  }
+  const injected = /\b(I[A-Z]\w+Service)\s+\w+/g;
+  while ((matched = injected.exec(snippet)) !== null) {
+    names.add(matched[1]);
+    if (names.size >= 10) break;
+  }
+  return [...names];
+}
