@@ -384,9 +384,10 @@ export function apply(ctx, config) {
       '1. 从 Controller 入口开始逐层向下追，不要只看一层：Controller → Service 实现 → 配置类（@Bean + @LisaService 生成的服务）→ 中台调用（setFuncNo 的功能号）。',
       '2. 每条调用写明方法名、参数或条件，关键判断与组装逻辑用 Note 说明，并行调用用 par/and 表示。',
       '3. 在回复最后输出一个 JSON 代码块（用三个反引号包住，标注 json），结构：',
-      '{"title":"一句话用途","summary":"两三句业务逻辑","mermaid":"sequenceDiagram\\n...","endpoints":[{"label":"GET /xxx","uri":"/xxx","kind":"http"}]}',
+      '{"title":"一句话用途","summary":"两三句业务逻辑","steps":[{"from":"客户端","to":"NewShareController","action":"GET /rest/xxx","kind":"http","uri":"/rest/xxx","note":"接口入口","group":""}],"endpoints":[{"label":"GET /rest/xxx","uri":"/rest/xxx","kind":"http"}]}',
       '4. endpoints 列出所有可查日志的入口：HTTP 接口给完整路径，中台调用给功能号（kind 用 middle）。',
-      '5. mermaid 里出现的文案要与 endpoints 的 label 保持一致。',
+      '5. kind 取值：http / service / middle（中台）/ dao / return / note；group 用于并行或同组步骤。',
+      '6. uri 只给可查日志的接口，action 文案要与 endpoints 的 label 保持一致。',
       '6. 只写代码里有依据的调用，不确定的用 Note 标注。',
     ].join('\n');
   }
@@ -412,10 +413,20 @@ export function apply(ctx, config) {
         .map((item) => ({ label: String(item?.label ?? ''), uri: String(item?.uri ?? ''), kind: String(item?.kind ?? 'http') }))
         .filter((item) => item.uri !== '')
       : [];
+    const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
+      seq: index + 1,
+      from: String(step?.from ?? ''),
+      to: String(step?.to ?? ''),
+      action: String(step?.action ?? ''),
+      kind: String(step?.kind ?? 'service'),
+      uri: typeof step?.uri === 'string' ? step.uri : '',
+      note: typeof step?.note === 'string' ? step.note : '',
+      group: typeof step?.group === 'string' ? step.group : '',
+    })) : [];
     return {
       title: String(value.title ?? ''),
       summary: String(value.summary ?? ''),
-      mermaid: typeof value.mermaid === 'string' ? value.mermaid : '',
+      steps,
       endpoints,
     };
   }
@@ -432,7 +443,12 @@ export function apply(ctx, config) {
     '{',
     '  "title": "接口用途，一句话",',
     '  "summary": "两三句话说明业务逻辑",',
-    '  "mermaid": "sequenceDiagram\\n    autonumber\\n    participant App as 优理宝App\\n    participant CTRL as XxxController\\n    App->>CTRL: GET /homepage/info/qry 带 stockcode\\n    CTRL->>SVC: qryColumnList(param)\\n    SVC-->>CTRL: 列表\\n    CTRL-->>App: RespBodyInfo",',
+    '  "steps": [',
+    '    {"from":"客户端","to":"XxxController","action":"GET /homepage/info/qry","kind":"http","uri":"/homepage/info/qry","note":"接口入口","group":""},',
+    '    {"from":"XxxController","to":"IHomepageService","action":"qryColumnList(param)","kind":"service","uri":"","note":"Lisa RPC","group":""},',
+    '    {"from":"HomepageServiceImpl","to":"中台 TC 141.87","action":"setFuncNo(CBD_XXX)","kind":"middle","uri":"CBD_XXX","note":"中台功能号","group":""},',
+    '    {"from":"XxxController","to":"客户端","action":"RespBodyInfo","kind":"return","uri":"","note":"","group":""}',
+    '  ],',
     '  "endpoints": [',
     '    {"label":"GET /homepage/info/qry","uri":"/homepage/info/qry","kind":"http"},',
     '    {"label":"TC 141.189 个股异动解读","uri":"141.189","kind":"middle"}',
@@ -449,7 +465,8 @@ export function apply(ctx, config) {
     '',
     'endpoints 要求：',
     '- 列出所有可查询日志的接口：HTTP 接口给完整路径（含类级前缀），中台接口给编码',
-    '- label 必须与 mermaid 里出现的文案保持一致，便于前端高亮',
+    '- label 必须与 steps 里 action 的文案保持一致，便于前端高亮；uri 只填可查日志的接口，其余留空',
+    '- kind 取值：http / service / middle / dao / return / note；group 用于标记并行或同组步骤',
     '',
     '规则：只写代码里有依据的调用，不要编造；不确定的地方用 Note 标注「需结合实现确认」。',
   ].join('\\n');
@@ -552,10 +569,20 @@ export function apply(ctx, config) {
       uri: String(item?.uri ?? ''),
       kind: String(item?.kind ?? 'http'),
     })).filter((item) => item.uri !== '') : [];
+    const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
+      seq: index + 1,
+      from: String(step?.from ?? ''),
+      to: String(step?.to ?? ''),
+      action: String(step?.action ?? ''),
+      kind: String(step?.kind ?? 'service'),
+      uri: typeof step?.uri === 'string' ? step.uri : '',
+      note: typeof step?.note === 'string' ? step.note : '',
+      group: typeof step?.group === 'string' ? step.group : '',
+    })) : [];
     return {
       title: String(value.title ?? ''),
       summary: String(value.summary ?? ''),
-      mermaid: typeof value.mermaid === 'string' ? value.mermaid : '',
+      steps,
       endpoints,
     };
   }
@@ -578,14 +605,14 @@ export function apply(ctx, config) {
       try {
         const reply = await askSession(analyzeSessionId, buildSessionTask(project, repoPath, uri));
         const parsed = parseSessionReply(reply);
-        if (parsed.mermaid !== '') {
+        if (parsed.steps.length > 0) {
           return {
             ok: true,
             project,
             uri,
             title: parsed.title,
             summary: parsed.summary,
-            mermaid: parsed.mermaid,
+            steps: parsed.steps,
             endpoints: parsed.endpoints,
             source: { mode: 'session', sessionId: analyzeSessionId },
           };
@@ -608,13 +635,63 @@ export function apply(ctx, config) {
         uri,
         title: analysis.title,
         summary: analysis.summary,
-        mermaid: analysis.mermaid,
+        steps: analysis.steps,
         endpoints: analysis.endpoints,
         source: { mode: 'local', file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
       };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }
+  }
+
+  /**
+   * 读取分析会话里最近一次的接口分析结果。
+   * @returns {Promise<object>} 分析结果
+   */
+  async function runAnalyzeLatest() {
+    if (analyzeSessionId === '') return { ok: false, reason: '未配置分析会话' };
+    let agents;
+    try {
+      agents = typeof ctx?.get === 'function' ? ctx.get('agents') : ctx?.agents;
+    } catch {
+      agents = undefined;
+    }
+    if (agents === undefined || agents === null || typeof agents.get !== 'function') {
+      return { ok: false, reason: '当前环境不支持读取会话' };
+    }
+    const agent = agents.get(analyzeSessionId);
+    if (agent === null || agent === undefined) {
+      return { ok: false, reason: `会话 ${analyzeSessionId} 不在线，请先在 DSH 里打开它` };
+    }
+
+    const events = eventsOf(agent.session);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type !== 'assistant/message') continue;
+      const blocks = event.data?.message?.content;
+      if (!Array.isArray(blocks)) continue;
+      const text = blocks
+        .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('');
+      if (text.trim() === '') continue;
+      try {
+        const parsed = parseSessionReply(text);
+        if (parsed.steps.length > 0) {
+          return {
+            ok: true,
+            title: parsed.title,
+            summary: parsed.summary,
+            steps: parsed.steps,
+            endpoints: parsed.endpoints,
+            source: { mode: 'session-latest', sessionId: analyzeSessionId },
+          };
+        }
+      } catch {
+        // 这一条不是分析结果，继续往前找
+      }
+    }
+    return { ok: false, reason: '会话里还没有可用的分析结果' };
   }
 
   //#endregion
@@ -1021,6 +1098,7 @@ export function apply(ctx, config) {
   const ENDPOINTS = Object.freeze({
     ask: runAsk,
     analyze: runAnalyze,
+    'analyze-latest': runAnalyzeLatest,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',

@@ -32,6 +32,9 @@ window.__ModuleLoader__.load({
 			tabAnalyze: '接口分析',
 			projectLabel: '项目',
 			analyzeBtn: '分析',
+			loadLatest: '读取最新分析',
+			latestHint: '切走页面后请求会中断，可从这里取回会话里最近一次分析结果',
+			noLatest: '会话里还没有分析结果',
 			analyzing: '分析中…（读取代码并调用模型，约 10-30 秒）',
 			sequenceTitle: '调用时序',
 			clickToSearch: '蓝色接口可点击，直接跳转日志查询',
@@ -116,6 +119,9 @@ window.__ModuleLoader__.load({
 			tabAnalyze: 'API analysis',
 			projectLabel: 'Project',
 			analyzeBtn: 'Analyze',
+			loadLatest: 'Load latest',
+			latestHint: 'Leaving the page drops the running request — fetch the latest result from the session here',
+			noLatest: 'No analysis result in the session yet',
 			analyzing: 'Analyzing… (reads code, calls model, 10-30s)',
 			sequenceTitle: 'Sequence',
 			clickToSearch: 'Blue endpoints jump to log query',
@@ -1331,16 +1337,85 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 接口分析 Tab：选定项目与接口，定位代码后生成调用时序。 */
+		/** 各类步骤的配色与标签。 */
+		const STEP_KIND = {
+			http: { color: '#2563eb', label: 'HTTP' },
+			service: { color: '#64748b', label: '服务' },
+			middle: { color: '#7c3aed', label: '中台' },
+			dao: { color: '#059669', label: '存储' },
+			return: { color: '#94a3b8', label: '返回' },
+			note: { color: '#ca8a04', label: '说明' },
+		};
+
+		/** 把分析步骤渲染成竖向时间轴，可点击的步骤直接跳日志。 */
+		function StepTimeline({ steps, endpoints, onOpenLogs }) {
+			if (!Array.isArray(steps) || steps.length === 0) return h('div', { style: S.empty }, translate('noResult'));
+			return h('div', { style: { position: 'relative', paddingLeft: 22, paddingTop: 6 } },
+				h('div', { style: { position: 'absolute', left: 8, top: 14, bottom: 16, width: 2, background: COLORS.border1 } }),
+				steps.map((step, index) => {
+					const kind = STEP_KIND[step.kind] ?? STEP_KIND.service;
+					const target = step.uri !== '' ? step.uri : matchEndpoint(step.action, endpoints);
+					const clickable = typeof target === 'string' && target !== '';
+					return h('div', { key: `st${index}`, style: { position: 'relative', marginBottom: 13 } },
+						h('div', {
+							style: {
+								position: 'absolute',
+								left: -18,
+								top: 6,
+								width: 9,
+								height: 9,
+								borderRadius: '50%',
+								background: kind.color,
+								boxShadow: `0 0 0 2px ${COLORS.layer1}`,
+							},
+						}),
+						h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' } },
+							h('span', {
+								style: {
+									...S.mono,
+									fontSize: 10,
+									minWidth: 16,
+									textAlign: 'center',
+									color: kind.color,
+								},
+							}, String(index + 1)),
+							h('span', { style: { fontSize: 12, fontWeight: 600 } }, `${step.from} → ${step.to}`),
+							h('span', {
+								style: {
+									fontSize: 10,
+									padding: '1px 5px',
+									borderRadius: 3,
+									color: kind.color,
+									border: `1px solid ${kind.color}`,
+									opacity: 0.85,
+								},
+							}, kind.label)),
+						clickable
+							? h('a', {
+								style: { ...S.mono, fontSize: 12, color: COLORS.brand, cursor: 'pointer', textDecoration: 'underline', display: 'block' },
+								onClick: () => onOpenLogs(target),
+							}, step.action)
+							: h('div', { style: { ...S.mono, fontSize: 12, color: COLORS.label1, wordBreak: 'break-all' } }, step.action),
+						step.note !== '' ? h('div', { style: { fontSize: 11, color: COLORS.label2, marginTop: 2, lineHeight: 1.6 } }, step.note) : null);
+				}));
+		}
+
 		function AnalyzeTab({ onOpenLogs, pending, onConsumed }) {
 			const [project, setProject] = useState(memory.analyze.project);
 			const [uri, setUri] = useState(memory.analyze.uri);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
 			const [data, setData] = useState(memory.analyze.data);
+			const [interrupted, setInterrupted] = useState(false);
 
 			useEffect(() => {
-				memory.analyze = { project, uri, data };
-			}, [project, uri, data]);
+				memory.analyze = { project, uri, data, loading };
+			}, [project, uri, data, loading]);
+
+			// 页面切走会中断请求：回来时若上次仍在分析，提示可用「读取最新分析」取回
+			useEffect(() => {
+				if (memory.analyze.loading === true) setInterrupted(true);
+			}, []);
 
 			// 从其他页面右键带过来的接口路径：填入并立即分析
 			useEffect(() => {
@@ -1380,6 +1455,24 @@ window.__ModuleLoader__.load({
 				}
 			}, [project, uri]);
 
+			const loadLatest = useCallback(async () => {
+				setError('');
+				setInterrupted(false);
+				setLoading(true);
+				try {
+					const value = await callRpc('analyze-latest', {}, 30000);
+					if (Array.isArray(value?.steps) && value.steps.length > 0) {
+						setData(value);
+					} else {
+						setError(translate('noLatest'));
+					}
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				} finally {
+					setLoading(false);
+				}
+			}, []);
+
 			const header = data === null ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
 				h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, data.title || '—'),
 				h('div', { style: { fontSize: 12, color: COLORS.label2, lineHeight: 1.7 } }, data.summary || ''),
@@ -1387,13 +1480,12 @@ window.__ModuleLoader__.load({
 					`${data.project ?? ''} · ${data.source?.file ?? ''}:${data.source?.line ?? ''}`));
 
 			const endpoints = data === null || !Array.isArray(data.endpoints) ? [] : data.endpoints;
+			const steps = data === null || !Array.isArray(data.steps) ? [] : data.steps;
 			const sequence = data === null ? null : h('div', null,
-				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' } },
+				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' } },
 					h('span', { style: S.chip }, translate('sequenceTitle')),
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('clickToSearch'))),
-				typeof data.mermaid === 'string' && data.mermaid !== ''
-					? h(SequenceDiagram, { mermaid: data.mermaid, endpoints, onOpenLogs })
-					: h('div', { style: S.empty }, translate('noResult')));
+				h(StepTimeline, { steps, endpoints, onOpenLogs }));
 
 			return h('div', null,
 				h('div', { style: S.form },
@@ -1411,9 +1503,17 @@ window.__ModuleLoader__.load({
 							onChange: (e) => setUri(e.target.value),
 							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
 						})),
-					h('button', { style: S.button(true), onClick: run, disabled: loading, type: 'button' },
-						loading ? translate('analyzing') : translate('analyzeBtn'))),
+					h('div', { style: { display: 'flex', gap: 8 } },
+						h('button', { style: S.button(true), onClick: run, disabled: loading, type: 'button' },
+							loading ? translate('analyzing') : translate('analyzeBtn')),
+						h('button', { style: S.button(false), onClick: loadLatest, disabled: loading, type: 'button' },
+							translate('loadLatest')))),
 				h(ErrorBox, { message: error }),
+				interrupted && !loading
+					? h('div', { style: { ...S.card, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+						h('span', { style: { fontSize: 12, color: COLORS.label2 } }, translate('latestHint')),
+						h('button', { style: S.button(false), onClick: loadLatest, type: 'button' }, translate('loadLatest')))
+					: null,
 				loading ? h('div', { style: S.empty }, translate('analyzing')) : null,
 				header,
 				sequence);
