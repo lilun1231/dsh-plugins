@@ -98,6 +98,8 @@ window.__ModuleLoader__.load({
 			copied: '已复制',
 			backToLogs: '返回日志',
 			openInPlatform: '在平台打开',
+			exportPdf: '导出 PDF',
+			exportPdfHint: '导出使用平台页面自带的「导出为pdf文件」功能',
 			spans: '调用段落',
 			empty: '填写条件后点击查询',
 		};
@@ -174,6 +176,8 @@ window.__ModuleLoader__.load({
 			copied: 'Copied',
 			backToLogs: 'Back to logs',
 			openInPlatform: 'Open in platform',
+			exportPdf: 'Export PDF',
+			exportPdfHint: 'Export uses the platform page built-in PDF export',
 			spans: 'Spans',
 			empty: 'Fill in and search',
 		};
@@ -348,7 +352,7 @@ window.__ModuleLoader__.load({
 		const memory = {
 			tab: 'logs',
 			logs: { keyword: '', services: '', exclude: '', level: '', env: '', minutes: 30, result: null },
-			trace: { mode: 'serial', serialNo: '', uri: '', keyword: '', service: '', traceType: 'http', minutes: 30, detail: null, list: null },
+			trace: { mode: 'serial', serialNo: '', uri: '', keyword: '', service: '', traceType: 'http', minutes: 30, detail: null, picked: null, list: null },
 			status: { service: 'hall-restful', minutes: 60, stats: null },
 			audit: { items: null },
 			ask: { question: '', answer: '', plan: null, result: null },
@@ -557,21 +561,29 @@ window.__ModuleLoader__.load({
 						`${bottleneck.span?.service ?? '—'} ${bottleneck.span?.uri ?? ''} — ${fmtMs(bottleneck.durationMs)}（占 ${fmtPct(bottleneck.share)}）`))
 				: null;
 
+			/** 打开平台详情页：原生导出 PDF 就在该页面里。 */
+			const openPlatform = () => {
+				// 先同步开窗占位，避免异步取地址后被浏览器拦截
+				const win = window.open('', '_blank');
+				callRpc('export-trace', { serialNo: detail.serialNo, format: 'url' }).then((res) => {
+					if (typeof res?.url === 'string' && res.url !== '') {
+						if (win) win.location.href = res.url;
+						else window.open(res.url, '_blank');
+					} else if (win) {
+						win.close();
+					}
+				}).catch((e) => {
+					// 打不开平台页不影响已渲染的链路树
+					console.warn('[log-insight] 打开平台页失败', e);
+					if (win) win.close();
+				});
+			};
+
 			const toolbar = h('div', { style: { display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' } },
 				h('span', { style: S.chip }, `${translate('spans')} ${spans.length}`),
-				h('button', {
-					style: S.button(false),
-					type: 'button',
-					onClick: async () => {
-						try {
-							const res = await callRpc('export-trace', { serialNo: detail.serialNo, format: 'url' });
-							if (res?.url) window.open(res.url, '_blank');
-						} catch (e) {
-							// 打开平台页失败不影响已渲染的链路树
-							console.warn('[log-insight] 打开平台页失败', e);
-						}
-					},
-				}, translate('openInPlatform')));
+				h('button', { style: S.button(true), type: 'button', onClick: openPlatform }, translate('exportPdf')),
+				h('button', { style: S.button(false), type: 'button', onClick: openPlatform }, translate('openInPlatform')),
+				h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('exportPdfHint')));
 
 			const rows = spans.map((span, idx) => {
 				const isBottleneck = bottleneck && span.service === bottleneck.span?.service && span.durationMs === bottleneck.durationMs;
@@ -614,11 +626,12 @@ window.__ModuleLoader__.load({
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
 			const [detail, setDetail] = useState(initialSerialNo ? null : memory.trace.detail);
+			const [picked, setPicked] = useState(memory.trace.picked);
 			const [list, setList] = useState(memory.trace.list);
 
 			useEffect(() => {
-				memory.trace = { mode, serialNo, uri, keyword, service, traceType, minutes, detail, list };
-			}, [mode, serialNo, uri, keyword, service, traceType, minutes, detail, list]);
+				memory.trace = { mode, serialNo, uri, keyword, service, traceType, minutes, detail, picked, list };
+			}, [mode, serialNo, uri, keyword, service, traceType, minutes, detail, picked, list]);
 
 			const loadDetail = useCallback(async (target) => {
 				const value = String(target ?? serialNo).trim();
@@ -657,6 +670,21 @@ window.__ModuleLoader__.load({
 					setLoading(false);
 				}
 			}, [uri, keyword, service, traceType, minutes]);
+
+			/** 条件搜索结果里点开某一条，详情独立存放，不影响流水号模式。 */
+			const openFromList = useCallback(async (value) => {
+				if (typeof value !== 'string' || value === '') return;
+				setLoading(true);
+				setError('');
+				try {
+					setPicked(await callRpc('trace', { serialNo: value }));
+				} catch (e) {
+					setError(String(e?.message ?? e));
+					setPicked(null);
+				} finally {
+					setLoading(false);
+				}
+			}, []);
 
 			useEffect(() => {
 				if (typeof initialSerialNo === 'string' && initialSerialNo !== '') {
@@ -727,7 +755,7 @@ window.__ModuleLoader__.load({
 						list.items.map((item, idx) => h('div', {
 							key: idx,
 							style: { ...S.row, cursor: 'pointer' },
-							onClick: () => loadDetail(item.serialNo),
+							onClick: () => openFromList(item.serialNo),
 						},
 							h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 150 } }, String(item.callTime ?? '').slice(0, 19)),
 							h('span', { style: { ...S.mono, flexShrink: 0, width: 120, overflow: 'hidden', textOverflow: 'ellipsis' } }, item.service || '—'),
@@ -735,15 +763,21 @@ window.__ModuleLoader__.load({
 							h('span', { style: { ...S.mono, width: 64, textAlign: 'right', flexShrink: 0 } }, fmtMs(item.durationMs)),
 							h('span', { style: { ...S.mono, color: COLORS.brand, flexShrink: 0, fontSize: 11 } }, String(item.serialNo ?? '').slice(-20))))));
 
-			const detailView = detail === null ? null : buildTraceDetail(detail);
+			// 两种模式各自渲染自己的结果，切换时互不串台；数据保留在 memory 里，切回来还在
+			const serialView = h('div', null,
+				serialForm,
+				h(ErrorBox, { message: error }),
+				detail === null ? h('div', { style: S.empty }, translate('empty')) : buildTraceDetail(detail));
+
+			const conditionView = h('div', null,
+				conditionForm,
+				h(ErrorBox, { message: error }),
+				list === null ? h('div', { style: S.empty }, translate('empty')) : listView,
+				picked === null ? null : buildTraceDetail(picked));
 
 			return h('div', null,
 				modeBar,
-				mode === 'serial' ? serialForm : conditionForm,
-				h(ErrorBox, { message: error }),
-				detail === null && list === null ? h('div', { style: S.empty }, translate('empty')) : null,
-				detailView,
-				listView);
+				mode === 'serial' ? serialView : conditionView);
 		}
 
 		/** 判断链路里是否含异常节点。 */
