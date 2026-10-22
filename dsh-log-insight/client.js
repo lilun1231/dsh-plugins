@@ -42,7 +42,11 @@ window.__ModuleLoader__.load({
 			okLabel: '成功',
 			failLabel: '失败',
 			keyword: '关键字',
-			keywordPlaceholder: '错误码、接口路径或入参',
+			keywordPlaceholder: '错误码/接口/入参，空格分隔多个词=同时包含',
+			exclude: '排除',
+			excludePlaceholder: '不包含这些词，空格分隔',
+			env: '环境',
+			levelAll: '全部级别',
 			traceId: '流水号',
 			traceIdPlaceholder: 'hall-restful-...',
 			services: '服务',
@@ -56,6 +60,19 @@ window.__ModuleLoader__.load({
 			search: '查询',
 			searching: '查询中…',
 			serialNo: '流水号',
+			modeSerial: '流水号',
+			modeCondition: '条件搜索',
+			uriLabel: '接口路径',
+			uriPlaceholder: '如 /hall/indexinfo/query',
+			traceKeyword: '关键字',
+			traceKeywordPlaceholder: '入参、返回值或错误码',
+			traceService: '服务名',
+			traceServicePlaceholder: '留空=全部，如 hall-restful',
+			typeLabel: '类型',
+			typeHttp: '正常调用',
+			typeException: '异常调用',
+			resultList: '搜索结果',
+			clickToOpen: '点击查看链路详情',
 			detail: '查看链路',
 			exportCsv: '导出 CSV',
 			total: '总量',
@@ -94,7 +111,11 @@ window.__ModuleLoader__.load({
 			okLabel: 'ok',
 			failLabel: 'failed',
 			keyword: 'Keyword',
-			keywordPlaceholder: 'error code, path or parameter',
+			keywordPlaceholder: 'space-separated words are ANDed',
+			exclude: 'Exclude',
+			excludePlaceholder: 'words to exclude',
+			env: 'Env',
+			levelAll: 'All levels',
 			traceId: 'Trace id',
 			traceIdPlaceholder: 'hall-restful-...',
 			services: 'Services',
@@ -108,6 +129,19 @@ window.__ModuleLoader__.load({
 			search: 'Search',
 			searching: 'Searching…',
 			serialNo: 'Serial no',
+			modeSerial: 'Serial',
+			modeCondition: 'Filter',
+			uriLabel: 'URI',
+			uriPlaceholder: '/hall/indexinfo/query',
+			traceKeyword: 'Keyword',
+			traceKeywordPlaceholder: 'parameters, result or error code',
+			traceService: 'Service',
+			traceServicePlaceholder: 'empty = all',
+			typeLabel: 'Type',
+			typeHttp: 'Normal',
+			typeException: 'Exception',
+			resultList: 'Results',
+			clickToOpen: 'Open trace detail',
 			detail: 'Open trace',
 			exportCsv: 'Export CSV',
 			total: 'Total',
@@ -299,8 +333,8 @@ window.__ModuleLoader__.load({
 		/** 面板状态记忆：切到别处再回来时恢复输入与结果。 */
 		const memory = {
 			tab: 'logs',
-			logs: { keyword: '', services: '', minutes: 30, result: null },
-			trace: { serialNo: '', detail: null },
+			logs: { keyword: '', services: '', exclude: '', level: '', env: '', minutes: 30, result: null },
+			trace: { mode: 'serial', serialNo: '', uri: '', keyword: '', service: '', traceType: 'http', minutes: 30, detail: null, list: null },
 			status: { service: 'hall-restful', minutes: 60, stats: null },
 			audit: { items: null },
 		};
@@ -389,6 +423,9 @@ window.__ModuleLoader__.load({
 		function LogsTab({ onOpenTrace }) {
 			const [keyword, setKeyword] = useState(memory.logs.keyword);
 			const [services, setServices] = useState(memory.logs.services);
+			const [exclude, setExclude] = useState(memory.logs.exclude);
+			const [level, setLevel] = useState(memory.logs.level);
+			const [env, setEnv] = useState(memory.logs.env);
 			const [minutes, setMinutes] = useState(memory.logs.minutes);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
@@ -396,21 +433,26 @@ window.__ModuleLoader__.load({
 			const [expanded, setExpanded] = useState({});
 
 			useEffect(() => {
-				memory.logs = { keyword, services, minutes, result };
-			}, [keyword, services, minutes, result]);
+				memory.logs = { keyword, services, exclude, level, env, minutes, result };
+			}, [keyword, services, exclude, level, env, minutes, result]);
 
 			const run = useCallback(async () => {
 				setLoading(true);
 				setError('');
 				try {
 					const range = rangeOf(minutes);
+					const words = keyword.split(/\s+/).map((x) => x.trim()).filter((x) => x !== '');
+					const excludes = exclude.split(/\s+/).map((x) => x.trim()).filter((x) => x !== '');
 					const list = services.split(',').map((x) => x.trim()).filter((x) => x !== '');
 					const res = await callRpc('search', {
-						keyword: keyword.trim() === '' ? undefined : keyword.trim(),
+						keywords: words.length > 0 ? words : undefined,
+						excludeKeywords: excludes.length > 0 ? excludes : undefined,
 						services: list.length > 0 ? list : undefined,
+						level: level === '' ? undefined : level,
+						env: env === '' ? undefined : env,
 						from: range.from,
 						to: range.to,
-						limit: 50,
+						limit: 20,
 					});
 					setResult(res);
 					setExpanded({});
@@ -433,6 +475,14 @@ window.__ModuleLoader__.load({
 							onChange: (e) => setKeyword(e.target.value),
 							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
 						})),
+					h(Field, { label: translate('exclude') },
+						h('input', {
+							style: S.input,
+							value: exclude,
+							placeholder: translate('excludePlaceholder'),
+							onChange: (e) => setExclude(e.target.value),
+							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
+						})),
 					h(Field, { label: translate('services') },
 						h('input', {
 							style: S.input,
@@ -440,6 +490,20 @@ window.__ModuleLoader__.load({
 							placeholder: translate('servicesPlaceholder'),
 							onChange: (e) => setServices(e.target.value),
 						})),
+					h(Field, { label: translate('level') },
+						h('select', {
+							style: S.input,
+							value: level,
+							onChange: (e) => setLevel(e.target.value),
+						}, [h('option', { key: '', value: '' }, translate('levelAll'))]
+							.concat(['ERROR', 'WARN', 'INFO'].map((v) => h('option', { key: v, value: v }, v))))),
+					h(Field, { label: translate('env') },
+						h('select', {
+							style: S.input,
+							value: env,
+							onChange: (e) => setEnv(e.target.value),
+						}, [h('option', { key: '', value: '' }, 'fat'),
+							...['uat', 'dev'].map((v) => h('option', { key: v, value: v }, v))])),
 					h(Field, { label: translate('range') }, h(RangePicker, { minutes, onChange: setMinutes })),
 					h('button', { style: S.button(true), onClick: run, disabled: loading, type: 'button' },
 						loading ? translate('searching') : translate('search'))),
@@ -465,24 +529,90 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 链路 Tab。 */
+		/** 渲染链路详情：瓶颈卡片 + 段落树 + 异常信息。 */
+		function buildTraceDetail(detail) {
+			const spans = detail.spans ?? [];
+			const maxDuration = spans.reduce((acc, x) => Math.max(acc, x.durationMs), 0) || 1;
+			const bottleneck = detail.bottleneck;
+
+			const bottleneckCard = bottleneck
+				? h('div', { style: { ...S.card, marginBottom: 12, borderColor: COLORS.warn } },
+					h('div', { style: S.cardLabel }, translate('bottleneck')),
+					h('div', { style: { ...S.mono, color: COLORS.warn } },
+						`${bottleneck.span?.service ?? '—'} ${bottleneck.span?.uri ?? ''} — ${fmtMs(bottleneck.durationMs)}（占 ${fmtPct(bottleneck.share)}）`))
+				: null;
+
+			const toolbar = h('div', { style: { display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' } },
+				h('span', { style: S.chip }, `${translate('spans')} ${spans.length}`),
+				h('button', {
+					style: S.button(false),
+					type: 'button',
+					onClick: async () => {
+						try {
+							const res = await callRpc('export-trace', { serialNo: detail.serialNo, format: 'url' });
+							if (res?.url) window.open(res.url, '_blank');
+						} catch (e) {
+							// 打开平台页失败不影响已渲染的链路树
+							console.warn('[log-insight] 打开平台页失败', e);
+						}
+					},
+				}, translate('openInPlatform')));
+
+			const rows = spans.map((span, idx) => {
+				const isBottleneck = bottleneck && span.service === bottleneck.span?.service && span.durationMs === bottleneck.durationMs;
+				const isError = span.type === 'exception';
+				return h('div', {
+					key: idx,
+					style: {
+						...S.row,
+						paddingLeft: 10 + span.depth * 18,
+						background: isBottleneck ? COLORS.layer2 : 'transparent',
+					},
+				},
+					h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 150 } }, span.type),
+					h('span', { style: { ...S.mono, color: isError ? COLORS.error : COLORS.label1, flexShrink: 0, width: 130, overflow: 'hidden', textOverflow: 'ellipsis' } }, span.service || '—'),
+					h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, span.uri || ''),
+					h('div', { style: S.bar }, h('div', { style: S.barFill((span.durationMs / maxDuration) * 100, isError ? COLORS.error : (isBottleneck ? COLORS.warn : COLORS.brand)) })),
+					h('span', { style: { ...S.mono, width: 60, textAlign: 'right', flexShrink: 0, color: isBottleneck ? COLORS.warn : COLORS.label2 } }, fmtMs(span.durationMs)));
+			});
+
+			const exceptionLine = spans.some((x) => x.type === 'exception')
+				? h('div', { style: S.hint }, spans.filter((x) => x.type === 'exception').map((x) => x.error).join(' | '))
+				: null;
+
+			return h('div', null,
+				bottleneckCard,
+				toolbar,
+				h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } }, rows),
+				exceptionLine);
+		}
+
+		/** 调用链 Tab：按流水号直查，或按接口+关键字搜索。 */
 		function TraceTab({ initialSerialNo, onConsumed }) {
+			const [mode, setMode] = useState(memory.trace.mode);
 			const [serialNo, setSerialNo] = useState(initialSerialNo ?? memory.trace.serialNo);
+			const [uri, setUri] = useState(memory.trace.uri);
+			const [keyword, setKeyword] = useState(memory.trace.keyword);
+			const [service, setService] = useState(memory.trace.service);
+			const [traceType, setTraceType] = useState(memory.trace.traceType);
+			const [minutes, setMinutes] = useState(memory.trace.minutes);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
 			const [detail, setDetail] = useState(initialSerialNo ? null : memory.trace.detail);
+			const [list, setList] = useState(memory.trace.list);
 
 			useEffect(() => {
-				memory.trace = { serialNo, detail };
-			}, [serialNo, detail]);
+				memory.trace = { mode, serialNo, uri, keyword, service, traceType, minutes, detail, list };
+			}, [mode, serialNo, uri, keyword, service, traceType, minutes, detail, list]);
 
-			const run = useCallback(async (target) => {
+			const loadDetail = useCallback(async (target) => {
 				const value = String(target ?? serialNo).trim();
 				if (value === '') return;
 				setLoading(true);
 				setError('');
 				try {
-					const res = await callRpc('trace', { serialNo: value });
-					setDetail(res);
+					setSerialNo(value);
+					setDetail(await callRpc('trace', { serialNo: value }));
 				} catch (e) {
 					setError(String(e?.message ?? e));
 					setDetail(null);
@@ -491,75 +621,114 @@ window.__ModuleLoader__.load({
 				}
 			}, [serialNo]);
 
+			const searchByCondition = useCallback(async () => {
+				setLoading(true);
+				setError('');
+				try {
+					const range = rangeOf(minutes);
+					setList(await callRpc('traces', {
+						uri: uri.trim() === '' ? undefined : uri.trim(),
+						keyword: keyword.trim() === '' ? undefined : keyword.trim(),
+						service: service.trim() === '' ? undefined : service.trim(),
+						type: traceType,
+						from: range.from,
+						to: range.to,
+						limit: 20,
+					}));
+				} catch (e) {
+					setError(String(e?.message ?? e));
+					setList(null);
+				} finally {
+					setLoading(false);
+				}
+			}, [uri, keyword, service, traceType, minutes]);
+
 			useEffect(() => {
 				if (typeof initialSerialNo === 'string' && initialSerialNo !== '') {
-					setSerialNo(initialSerialNo);
-					run(initialSerialNo);
+					setMode('serial');
+					loadDetail(initialSerialNo);
 					onConsumed();
 				}
 			}, [initialSerialNo]);
 
-			const spans = detail?.spans ?? [];
-			const maxDuration = spans.reduce((acc, x) => Math.max(acc, x.durationMs), 0) || 1;
-			const bottleneck = detail?.bottleneck;
+			const modeBar = h('div', { style: { display: 'flex', gap: 4, marginBottom: 10 } },
+				[['serial', 'modeSerial'], ['condition', 'modeCondition']].map(([key, labelKey]) =>
+					h('button', { key, type: 'button', style: S.tab(mode === key), onClick: () => setMode(key) }, translate(labelKey))));
+
+			const serialForm = h('div', { style: S.form },
+				h(Field, { label: translate('serialNo') },
+					h('input', {
+						style: S.input,
+						value: serialNo,
+						placeholder: translate('traceIdPlaceholder'),
+						onChange: (e) => setSerialNo(e.target.value),
+						onKeyDown: (e) => { if (e.key === 'Enter') loadDetail(); },
+					})),
+				h('button', { style: S.button(true), onClick: () => loadDetail(), disabled: loading, type: 'button' },
+					loading ? translate('searching') : translate('search')));
+
+			const conditionForm = h('div', { style: S.form },
+				h(Field, { label: translate('uriLabel') },
+					h('input', {
+						style: S.input,
+						value: uri,
+						placeholder: translate('uriPlaceholder'),
+						onChange: (e) => setUri(e.target.value),
+						onKeyDown: (e) => { if (e.key === 'Enter') searchByCondition(); },
+					})),
+				h(Field, { label: translate('traceKeyword') },
+					h('input', {
+						style: S.input,
+						value: keyword,
+						placeholder: translate('traceKeywordPlaceholder'),
+						onChange: (e) => setKeyword(e.target.value),
+						onKeyDown: (e) => { if (e.key === 'Enter') searchByCondition(); },
+					})),
+				h(Field, { label: translate('traceService') },
+					h('input', {
+						style: S.input,
+						value: service,
+						placeholder: translate('traceServicePlaceholder'),
+						onChange: (e) => setService(e.target.value),
+					})),
+				h(Field, { label: translate('typeLabel') },
+					h('select', {
+						style: S.input,
+						value: traceType,
+						onChange: (e) => setTraceType(e.target.value),
+					}, [
+						h('option', { key: 'http', value: 'http' }, translate('typeHttp')),
+						h('option', { key: 'exception', value: 'exception' }, translate('typeException')),
+					])),
+				h(Field, { label: translate('range') }, h(RangePicker, { minutes, onChange: setMinutes })),
+				h('button', { style: S.button(true), onClick: searchByCondition, disabled: loading, type: 'button' },
+					loading ? translate('searching') : translate('search')));
+
+			const listView = list === null ? null : h('div', { style: { marginBottom: 12 } },
+				h('div', { style: { marginBottom: 8 } }, h('span', { style: S.chip }, `${translate('resultList')} ${list.total}`)),
+				(list.items ?? []).length === 0
+					? h('div', { style: S.empty }, translate('noResult'))
+					: h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
+						list.items.map((item, idx) => h('div', {
+							key: idx,
+							style: { ...S.row, cursor: 'pointer' },
+							onClick: () => loadDetail(item.serialNo),
+						},
+							h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 150 } }, String(item.callTime ?? '').slice(0, 19)),
+							h('span', { style: { ...S.mono, flexShrink: 0, width: 120, overflow: 'hidden', textOverflow: 'ellipsis' } }, item.service || '—'),
+							h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.uri || ''),
+							h('span', { style: { ...S.mono, width: 64, textAlign: 'right', flexShrink: 0 } }, fmtMs(item.durationMs)),
+							h('span', { style: { ...S.mono, color: COLORS.brand, flexShrink: 0, fontSize: 11 } }, String(item.serialNo ?? '').slice(-20))))));
+
+			const detailView = detail === null ? null : buildTraceDetail(detail);
 
 			return h('div', null,
-				h('div', { style: S.form },
-					h(Field, { label: translate('serialNo') },
-						h('input', {
-							style: S.input,
-							value: serialNo,
-							placeholder: translate('traceIdPlaceholder'),
-							onChange: (e) => setSerialNo(e.target.value),
-							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
-						})),
-					h('button', { style: S.button(true), onClick: () => run(), disabled: loading, type: 'button' },
-						loading ? translate('searching') : translate('search'))),
-
+				modeBar,
+				mode === 'serial' ? serialForm : conditionForm,
 				h(ErrorBox, { message: error }),
-
-				detail === null
-					? h('div', { style: S.empty }, translate('empty'))
-					: h('div', null,
-						bottleneck
-							? h('div', { style: { ...S.card, marginBottom: 12, borderColor: COLORS.warn } },
-								h('div', { style: S.cardLabel }, translate('bottleneck')),
-								h('div', { style: { ...S.mono, color: COLORS.warn } },
-									`${bottleneck.span?.service ?? '—'} ${bottleneck.span?.uri ?? ''} — ${fmtMs(bottleneck.durationMs)}（占 ${fmtPct(bottleneck.share)}）`))
-							: null,
-						h('div', { style: { display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' } },
-							h('span', { style: S.chip }, `${translate('spans')} ${spans.length}`),
-							h('button', {
-								style: S.button(false),
-								type: 'button',
-								onClick: async () => {
-									try {
-										const res = await callRpc('export-trace', { serialNo: detail.serialNo, format: 'url' });
-										if (res?.url) window.open(res.url, '_blank');
-									} catch (e) {
-										setError(String(e?.message ?? e));
-									}
-								},
-							}, translate('openInPlatform'))),
-						h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
-							spans.map((span, idx) => {
-								const isBottleneck = bottleneck && span.service === bottleneck.span?.service && span.durationMs === bottleneck.durationMs;
-								const isError = span.type === 'exception';
-								return h('div', {
-									key: idx,
-									style: {
-										...S.row,
-										paddingLeft: 10 + span.depth * 18,
-										background: isBottleneck ? COLORS.layer2 : 'transparent',
-									},
-								},
-									h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 150 } }, span.type),
-									h('span', { style: { ...S.mono, color: isError ? COLORS.error : COLORS.label1, flexShrink: 0, width: 130, overflow: 'hidden', textOverflow: 'ellipsis' } }, span.service || '—'),
-									h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, span.uri || ''),
-									h('div', { style: S.bar }, h('div', { style: S.barFill((span.durationMs / maxDuration) * 100, isError ? COLORS.error : (isBottleneck ? COLORS.warn : COLORS.brand)) })),
-									h('span', { style: { ...S.mono, width: 60, textAlign: 'right', flexShrink: 0, color: isBottleneck ? COLORS.warn : COLORS.label2 } }, fmtMs(span.durationMs)));
-							})),
-						isAnyError(spans) ? h('div', { style: S.hint }, spans.filter((x) => x.type === 'exception').map((x) => x.error).join(' | ')) : null));
+				detail === null && list === null ? h('div', { style: S.empty }, translate('empty')) : null,
+				detailView,
+				listView);
 		}
 
 		/** 判断链路里是否含异常节点。 */

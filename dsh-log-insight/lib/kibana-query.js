@@ -6,7 +6,9 @@ import { KibanaSession } from './kibana-auth.js';
  * @returns {object} ES 查询 JSON
  */
 export function buildSearchBody(input) {
-  const { namespace, keyword, services = [], traceId, level, from, to, maxHits = 200 } = input;
+  const {
+    namespace, keyword, keywords, excludeKeywords, services = [], traceId, level, from, to, maxHits = 200,
+  } = input;
   const size = Math.min(input.limit ?? 50, maxHits);
 
   const filter = [
@@ -20,15 +22,27 @@ export function buildSearchBody(input) {
     filter.push({ term: { level: level.toLowerCase() } });
   }
 
+  // 多个关键字之间是 AND，排除关键字走 must_not
   const must = [];
   if (traceId) {
-    must.push({ query_string: { query: `message:"${traceId}"`, analyze_wildcard: true } });
-  } else if (keyword) {
-    must.push({ query_string: { query: `message:"${keyword}"`, analyze_wildcard: true } });
+    must.push({ query_string: { query: `message:"${escapeQuery(traceId)}"`, analyze_wildcard: true } });
+  } else {
+    const terms = Array.isArray(keywords) && keywords.length > 0
+      ? keywords
+      : (typeof keyword === 'string' && keyword !== '' ? [keyword] : []);
+    for (const term of terms) {
+      if (typeof term === 'string' && term !== '') {
+        must.push({ query_string: { query: `message:"${escapeQuery(term)}"`, analyze_wildcard: true } });
+      }
+    }
   }
+  const mustNot = (Array.isArray(excludeKeywords) ? excludeKeywords : [])
+    .filter((term) => typeof term === 'string' && term !== '')
+    .map((term) => ({ query_string: { query: `message:"${escapeQuery(term)}"`, analyze_wildcard: true } }));
 
   const bool = { filter };
   if (must.length > 0) bool.must = must;
+  if (mustNot.length > 0) bool.must_not = mustNot;
 
   return {
     size,
@@ -81,4 +95,13 @@ export function toLogHit(src) {
     message,
     traceId,
   };
+}
+
+/**
+ * 转义 query_string 里的引号与反斜杠，避免用户输入破坏查询语法。
+ * @param {unknown} value 原始关键字
+ * @returns {string} 转义后的关键字
+ */
+function escapeQuery(value) {
+  return String(value).replace(/["\\]/g, '\\$&');
 }

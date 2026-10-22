@@ -113,6 +113,8 @@ export function apply(ctx, config) {
       const body = buildSearchBody({
         namespace,
         keyword: args.keyword,
+        keywords: args.keywords,
+        excludeKeywords: args.excludeKeywords,
         services: args.services,
         level: args.level,
         traceId: args.traceId,
@@ -270,7 +272,9 @@ export function apply(ctx, config) {
     name: 'log_search',
     description: '按关键字、服务、级别或流水号检索应用日志。默认查近 30 分钟。返回日志条目，其中 traceId 即流水号，可直接用于 trace_detail。',
     parameters: {
-      keyword: { type: 'string', description: '关键字，例如错误码或接口路径' },
+      keyword: { type: 'string', description: '单个关键字，例如错误码或接口路径' },
+      keywords: { type: 'array', items: { type: 'string' }, description: '多个关键字，之间是且（AND）关系' },
+      excludeKeywords: { type: 'array', items: { type: 'string' }, description: '排除包含这些关键字的日志' },
       services: { type: 'array', items: { type: 'string' }, description: '限定容器名，可多个' },
       level: { type: 'string', description: '日志级别，如 ERROR、WARN、INFO' },
       traceId: { type: 'string', description: '流水号，给出则按它精确检索' },
