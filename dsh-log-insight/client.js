@@ -716,9 +716,9 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 调用链 Tab：按流水号直查，或按接口+关键字搜索。 */
-		function TraceTab({ initialSerialNo, onConsumed }) {
+		function TraceTab({ pending, onConsumed }) {
 			const [mode, setMode] = useState(memory.trace.mode);
-			const [serialNo, setSerialNo] = useState(initialSerialNo ?? memory.trace.serialNo);
+			const [serialNo, setSerialNo] = useState(typeof pending === 'string' && /^[\w-]+-\d+-\d+-\d+$/.test(pending) ? pending : memory.trace.serialNo);
 			const [uri, setUri] = useState(memory.trace.uri);
 			const [keyword, setKeyword] = useState(memory.trace.keyword);
 			const [service, setService] = useState(memory.trace.service);
@@ -726,7 +726,7 @@ window.__ModuleLoader__.load({
 			const [minutes, setMinutes] = useState(memory.trace.minutes);
 			const [loading, setLoading] = useState(false);
 			const [error, setError] = useState('');
-			const [detail, setDetail] = useState(initialSerialNo ? null : memory.trace.detail);
+			const [detail, setDetail] = useState(typeof pending === 'string' && pending !== '' ? null : memory.trace.detail);
 			const [picked, setPicked] = useState(memory.trace.picked);
 			const [list, setList] = useState(memory.trace.list);
 
@@ -787,13 +787,40 @@ window.__ModuleLoader__.load({
 				}
 			}, []);
 
+			// 从其他页面右键带过来的文本：流水号直接查详情，其余当作接口/关键字做条件搜索
 			useEffect(() => {
-				if (typeof initialSerialNo === 'string' && initialSerialNo !== '') {
+				if (typeof pending !== 'string' || pending.trim() === '') return;
+				const text = pending.trim();
+				onConsumed();
+				if (/^[\w-]+-\d+-\d+-\d+$/.test(text)) {
 					setMode('serial');
-					loadDetail(initialSerialNo);
-					onConsumed();
+					loadDetail(text);
+					return;
 				}
-			}, [initialSerialNo]);
+				setMode('condition');
+				setUri(text);
+				setLoading(true);
+				setError('');
+				(async () => {
+					try {
+						const range = rangeOf(minutes);
+						setList(await callRpc('traces', {
+							uri: text,
+							type: 'http',
+							from: range.from,
+							to: range.to,
+							limit: 20,
+						}));
+					} catch (e) {
+						setError(String(e?.message ?? e));
+						setList(null);
+					} finally {
+						setLoading(false);
+					}
+				})();
+				// 仅在外部跳转变化时触发
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, [pending]);
 
 			const modeBar = h('div', { style: { display: 'flex', gap: 4, marginBottom: 10 } },
 				[['serial', 'modeSerial'], ['condition', 'modeCondition']].map(([key, labelKey]) =>
@@ -1281,7 +1308,7 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 接口分析 Tab：选定项目与接口，定位代码后生成调用时序。 */
-		function AnalyzeTab({ onOpenLogs }) {
+		function AnalyzeTab({ onOpenLogs, pending, onConsumed }) {
 			const [project, setProject] = useState(memory.analyze.project);
 			const [uri, setUri] = useState(memory.analyze.uri);
 			const [loading, setLoading] = useState(false);
@@ -1291,6 +1318,29 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				memory.analyze = { project, uri, data };
 			}, [project, uri, data]);
+
+			// 从其他页面右键带过来的接口路径：填入并立即分析
+			useEffect(() => {
+				if (pending === null || typeof pending !== 'object') return;
+				const text = String(pending.uri ?? '').trim();
+				onConsumed();
+				if (text === '') return;
+				setUri(text);
+				setLoading(true);
+				setError('');
+				(async () => {
+					try {
+						setData(await callRpc('analyze', { project, uri: text }, 120000));
+					} catch (e) {
+						setError(String(e?.message ?? e));
+						setData(null);
+					} finally {
+						setLoading(false);
+					}
+				})();
+				// 仅在外部跳转变化时触发
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, [pending]);
 
 			const run = useCallback(async () => {
 				const value = uri.trim();
@@ -1435,6 +1485,13 @@ window.__ModuleLoader__.load({
 
 		//#region shell
 		/** 主面板：三个 Tab。 */
+		/** 右键菜单：当前页面可跳转的目标页面。 */
+		const MENU_TARGETS = {
+			analyze: [['logs', 'tabLogs'], ['trace', 'tabTrace']],
+			logs: [['analyze', 'tabAnalyze'], ['trace', 'tabTrace']],
+			trace: [['analyze', 'tabAnalyze'], ['logs', 'tabLogs']],
+		};
+
 		function MainPanel() {
 			const [tab, setTab] = useState(memory.tab);
 			const [health, setHealth] = useState(null);
@@ -1452,6 +1509,8 @@ window.__ModuleLoader__.load({
 			}, []);
 			const [pendingTrace, setPendingTrace] = useState('');
 			const [pendingLog, setPendingLog] = useState(null);
+			const [pendingAnalyze, setPendingAnalyze] = useState(null);
+			const [menu, setMenu] = useState(null);
 
 			const openTrace = useCallback((serialNo) => {
 				setPendingTrace(serialNo);
@@ -1467,6 +1526,74 @@ window.__ModuleLoader__.load({
 			}, []);
 
 			const consumeLog = useCallback(() => setPendingLog(null), []);
+			const consumeAnalyze = useCallback(() => setPendingAnalyze(null), []);
+
+			// 右键瞬间选区可能已被浏览器清空，这里缓存最近一次非空选区兜底
+			const lastSelection = useRef('');
+
+			useEffect(() => {
+				if (typeof document === 'undefined') return;
+				const onSelect = () => {
+					const raw = String(window.getSelection()?.toString() ?? '').trim();
+					if (raw !== '') lastSelection.current = raw;
+				};
+				document.addEventListener('selectionchange', onSelect);
+				return () => document.removeEventListener('selectionchange', onSelect);
+			}, []);
+
+			/** 取当前选中的文字：优先页面选区，其次输入框内的选区，最后用缓存兜底。 */
+			const readSelection = useCallback(() => {
+				const pageText = String(typeof window === 'undefined' ? '' : (window.getSelection()?.toString() ?? '')).trim();
+				if (pageText !== '') return pageText;
+				const active = typeof document === 'undefined' ? null : document.activeElement;
+				if (active !== null && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+					const start = Number(active.selectionStart ?? 0);
+					const end = Number(active.selectionEnd ?? 0);
+					if (end > start) {
+						const picked = String(active.value ?? '').slice(start, end).trim();
+						if (picked !== '') return picked;
+					}
+				}
+				return String(lastSelection.current ?? '').trim();
+			}, []);
+
+			/** 选中文本后右键：呼出跨页跳转菜单。 */
+			const openSelectionMenu = useCallback((event, source) => {
+				const text = readSelection();
+				if (text === '') return;
+				if (typeof event.preventDefault === 'function') event.preventDefault();
+				setMenu({ x: event.clientX, y: event.clientY, text, source });
+			}, [readSelection]);
+
+			/** 把选中的文本带到目标页面并自动查询。 */
+			const jumpTo = useCallback((target) => {
+				const text = menu === null ? '' : menu.text;
+				setMenu(null);
+				if (text === '') return;
+				if (target === 'logs') {
+					setPendingLog({ keyword: text });
+					setTab('logs');
+				} else if (target === 'trace') {
+					setPendingTrace(text);
+					setTab('trace');
+				} else {
+					setPendingAnalyze({ uri: text });
+					setTab('analyze');
+				}
+			}, [menu]);
+
+			// 点击别处或按 Esc 关闭菜单
+			useEffect(() => {
+				if (menu === null) return;
+				const close = () => setMenu(null);
+				const onKey = (event) => { if (event.key === 'Escape') setMenu(null); };
+				document.addEventListener('click', close);
+				document.addEventListener('keydown', onKey);
+				return () => {
+					document.removeEventListener('click', close);
+					document.removeEventListener('keydown', onKey);
+				};
+			}, [menu]);
 
 			return h('div', { style: S.root },
 				h('div', { style: S.header },
@@ -1488,13 +1615,58 @@ window.__ModuleLoader__.load({
 								onClick: () => setTab(key),
 								type: 'button',
 							}, translate(labelKey))))),
-				h('div', { style: S.body },
-					tab === 'analyze' ? h(AnalyzeTab, { onOpenLogs: openLogs }) : null,
+				h('div', { style: S.body, onContextMenu: (event) => openSelectionMenu(event, tab) },
+					tab === 'analyze' ? h(AnalyzeTab, { onOpenLogs: openLogs, pending: pendingAnalyze, onConsumed: consumeAnalyze }) : null,
 					tab === 'logs' ? h(LogsTab, { pendingQuery: pendingLog, onConsumed: consumeLog, onOpenTrace: openTrace }) : null,
-					tab === 'trace' ? h(TraceTab, { initialSerialNo: pendingTrace, onConsumed: consumePending }) : null,
+					tab === 'trace' ? h(TraceTab, { pending: pendingTrace, onConsumed: consumePending }) : null,
 					tab === 'status' ? h(StatusTab, null) : null,
 					tab === 'ask' ? h(AskTab, null) : null,
-					tab === 'audit' ? h(AuditTab, null) : null));
+					tab === 'audit' ? h(AuditTab, null) : null),
+				menu === null ? null : h('div', {
+					style: {
+						position: 'fixed',
+						left: Math.max(8, Math.min(menu.x, (typeof window === 'undefined' ? 900 : window.innerWidth) - 200)),
+						top: menu.y,
+						zIndex: 9999,
+						background: COLORS.layer1,
+						border: `1px solid ${COLORS.border1}`,
+						borderRadius: 8,
+						boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+						padding: 4,
+						minWidth: 168,
+					},
+					onClick: (event) => event.stopPropagation(),
+				},
+					h('div', {
+						style: {
+							fontSize: 10,
+							color: COLORS.label2,
+							padding: '4px 8px 6px',
+							borderBottom: `1px solid ${COLORS.border1}`,
+							marginBottom: 4,
+							maxWidth: 220,
+							overflow: 'hidden',
+							textOverflow: 'ellipsis',
+							whiteSpace: 'nowrap',
+						},
+					}, `用「${menu.text.length > 18 ? `${menu.text.slice(0, 17)}…` : menu.text}」查询`),
+					(MENU_TARGETS[menu.source] ?? []).map(([target, labelKey]) => h('button', {
+						key: target,
+						type: 'button',
+						onClick: () => jumpTo(target),
+						style: {
+							display: 'block',
+							width: '100%',
+							textAlign: 'left',
+							padding: '6px 10px',
+							background: 'none',
+							border: 'none',
+							borderRadius: 4,
+							cursor: 'pointer',
+							fontSize: 12,
+							color: COLORS.label1,
+						},
+					}, translate(labelKey)))));
 		}
 
 		/** 侧边栏图标。 */
