@@ -296,6 +296,16 @@ export function apply(ctx, config) {
 
   //#endregion
 
+  /**
+   * 清理文本里的孤立代理对，避免 JSON 序列化产出非法字符串。
+   * @param {unknown} value 原始值
+   * @returns {string} 安全字符串
+   */
+  function cleanText(value) {
+    const text = typeof value === 'string' ? value : String(value ?? '');
+    return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+  }
+
   //#region 会话派发
 
   /**
@@ -410,22 +420,22 @@ export function apply(ctx, config) {
     }
     const endpoints = Array.isArray(value.endpoints)
       ? value.endpoints
-        .map((item) => ({ label: String(item?.label ?? ''), uri: String(item?.uri ?? ''), kind: String(item?.kind ?? 'http') }))
+        .map((item) => ({ label: cleanText(item?.label), uri: cleanText(item?.uri), kind: cleanText(item?.kind) || 'http' }))
         .filter((item) => item.uri !== '')
       : [];
     const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
       seq: index + 1,
-      from: String(step?.from ?? ''),
-      to: String(step?.to ?? ''),
-      action: String(step?.action ?? ''),
-      kind: String(step?.kind ?? 'service'),
-      uri: typeof step?.uri === 'string' ? step.uri : '',
-      note: typeof step?.note === 'string' ? step.note : '',
-      group: typeof step?.group === 'string' ? step.group : '',
+      from: cleanText(step?.from),
+      to: cleanText(step?.to),
+      action: cleanText(step?.action),
+      kind: cleanText(step?.kind) || 'service',
+      uri: cleanText(step?.uri),
+      note: cleanText(step?.note),
+      group: cleanText(step?.group),
     })) : [];
     return {
-      title: String(value.title ?? ''),
-      summary: String(value.summary ?? ''),
+      title: cleanText(value.title),
+      summary: cleanText(value.summary),
       steps,
       endpoints,
     };
@@ -565,23 +575,23 @@ export function apply(ctx, config) {
       throw new Error('时序分析不是合法 JSON');
     }
     const endpoints = Array.isArray(value.endpoints) ? value.endpoints.map((item) => ({
-      label: String(item?.label ?? ''),
-      uri: String(item?.uri ?? ''),
-      kind: String(item?.kind ?? 'http'),
+      label: cleanText(item?.label),
+      uri: cleanText(item?.uri),
+      kind: cleanText(item?.kind) || 'http',
     })).filter((item) => item.uri !== '') : [];
     const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
       seq: index + 1,
-      from: String(step?.from ?? ''),
-      to: String(step?.to ?? ''),
-      action: String(step?.action ?? ''),
-      kind: String(step?.kind ?? 'service'),
-      uri: typeof step?.uri === 'string' ? step.uri : '',
-      note: typeof step?.note === 'string' ? step.note : '',
-      group: typeof step?.group === 'string' ? step.group : '',
+      from: cleanText(step?.from),
+      to: cleanText(step?.to),
+      action: cleanText(step?.action),
+      kind: cleanText(step?.kind) || 'service',
+      uri: cleanText(step?.uri),
+      note: cleanText(step?.note),
+      group: cleanText(step?.group),
     })) : [];
     return {
-      title: String(value.title ?? ''),
-      summary: String(value.summary ?? ''),
+      title: cleanText(value.title),
+      summary: cleanText(value.summary),
       steps,
       endpoints,
     };
@@ -649,6 +659,18 @@ export function apply(ctx, config) {
    * @returns {Promise<object>} 分析结果
    */
   async function runAnalyzeLatest() {
+    try {
+      return await readSessionLatest();
+    } catch (error) {
+      return { ok: false, reason: `读取会话失败：${String(error?.message ?? error)}` };
+    }
+  }
+
+  /**
+   * 真正读取会话最近一条分析结果。
+   * @returns {Promise<object>} 分析结果
+   */
+  async function readSessionLatest() {
     if (analyzeSessionId === '') return { ok: false, reason: '未配置分析会话' };
     let agents;
     try {
@@ -668,7 +690,8 @@ export function apply(ctx, config) {
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index];
       if (event?.type !== 'assistant/message') continue;
-      const blocks = event.data?.message?.content;
+      const payload = event.data?.message ?? event.data;
+      const blocks = payload?.content;
       if (!Array.isArray(blocks)) continue;
       const text = blocks
         .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
@@ -691,7 +714,13 @@ export function apply(ctx, config) {
         // 这一条不是分析结果，继续往前找
       }
     }
-    return { ok: false, reason: '会话里还没有可用的分析结果' };
+    const assistantCount = events.filter((event) => event?.type === 'assistant/message').length;
+    return {
+      ok: false,
+      reason: events.length === 0
+        ? '读不到会话事件（会话可能不在线或尚未加载）'
+        : `会话里有 ${events.length} 条事件、${assistantCount} 条助手回复，但没有解析出分析结果。请确认最新一次回复里包含 steps 的 JSON 代码块`,
+    };
   }
 
   //#endregion
@@ -1134,6 +1163,26 @@ export function apply(ctx, config) {
     const message = readClientRequest(body);
     if (message === null) return new Response('invalid client-request message', { status: 400 });
 
+    // 单个端点异常不能让整个路由崩掉，否则客户端只会看到 invalid server-response
+    try {
+      return await dispatchEndpoint(message, endpoint);
+    } catch (error) {
+      return Response.json({
+        type: 'server-response',
+        rpcId: message.rpcId,
+        result: { ok: false, error: { code: 'endpoint-failed', message: String(error?.message ?? error) } },
+      });
+    }
+  }
+
+  /**
+   * 执行单个端点并组装 RPC 响应。
+   * @param {object} message 客户端请求消息
+   * @param {string} endpoint 端点名
+   * @returns {Promise<Response>} HTTP 响应
+   */
+  async function dispatchEndpoint(message, endpoint) {
+
     // DSH RPC 契约：成功为 { ok: true, value }，失败为 { ok: false, error }
     let result;
     try {
@@ -1146,7 +1195,16 @@ export function apply(ctx, config) {
     } catch (error) {
       result = { ok: false, error: { code: 'endpoint-failed', message: String(error?.message ?? error) } };
     }
-    return Response.json({ type: 'server-response', rpcId: message.rpcId, result });
+    try {
+      return Response.json({ type: 'server-response', rpcId: message.rpcId, result });
+    } catch {
+      // 结果里有不可序列化内容时也要给出合法响应，否则客户端只会看到 invalid server-response
+      return Response.json({
+        type: 'server-response',
+        rpcId: message.rpcId,
+        result: { ok: false, error: { code: 'serialize-failed', message: '结果无法序列化，请缩小范围后重试' } },
+      });
+    }
   }
 
   // audit 端点只读文件，不进 ENDPOINTS，避免记录「查看审计」本身
