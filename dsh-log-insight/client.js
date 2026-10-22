@@ -31,6 +31,13 @@ window.__ModuleLoader__.load({
 			tabLogs: '日志',
 			tabTrace: '调用链',
 			tabStatus: '服务状态',
+			tabAsk: '问一问',
+			askPlaceholder: '用自然语言提问，例如：最近半小时 hall-restful 有没有报错',
+			askButton: '提问',
+			asking: '分析中…（需要调用模型，约 10-20 秒）',
+			answerLabel: '分析结论',
+			planLabel: '解析为',
+			askExamples: '试试：',
 			tabAudit: '操作日志',
 			connected: '已连接',
 			disconnected: '未连接',
@@ -100,6 +107,13 @@ window.__ModuleLoader__.load({
 			tabLogs: 'Logs',
 			tabTrace: 'Traces',
 			tabStatus: 'Status',
+			tabAsk: 'Ask',
+			askPlaceholder: 'Ask in natural language, e.g. any errors in hall-restful',
+			askButton: 'Ask',
+			asking: 'Analyzing… (model call, ~10-20s)',
+			answerLabel: 'Analysis',
+			planLabel: 'Parsed as',
+			askExamples: 'Try:',
 			tabAudit: 'Activity',
 			connected: 'connected',
 			disconnected: 'offline',
@@ -337,6 +351,7 @@ window.__ModuleLoader__.load({
 			trace: { mode: 'serial', serialNo: '', uri: '', keyword: '', service: '', traceType: 'http', minutes: 30, detail: null, list: null },
 			status: { service: 'hall-restful', minutes: 60, stats: null },
 			audit: { items: null },
+			ask: { question: '', answer: '', plan: null, result: null },
 		};
 
 		/** 按时间范围生成 ISO 起止。 */
@@ -851,6 +866,91 @@ window.__ModuleLoader__.load({
 								}, item.ok ? translate('okLabel') : `${translate('failLabel')} ${String(item.error ?? '').slice(0, 18)}`))))));
 		}
 
+		/** 自然语言问答 Tab：描述问题，由模型解析并执行查询后给出解读。 */
+		function AskTab() {
+			const [question, setQuestion] = useState(memory.ask.question);
+			const [loading, setLoading] = useState(false);
+			const [error, setError] = useState('');
+			const [answer, setAnswer] = useState(memory.ask.answer);
+			const [plan, setPlan] = useState(memory.ask.plan);
+			const [result, setResult] = useState(memory.ask.result);
+
+			useEffect(() => {
+				memory.ask = { question, answer, plan, result };
+			}, [question, answer, plan, result]);
+
+			const ask = useCallback(async () => {
+				const text = question.trim();
+				if (text === '') return;
+				setLoading(true);
+				setError('');
+				setAnswer('');
+				setPlan(null);
+				setResult(null);
+				try {
+					const res = await callRpc('ask', { question: text }, 90000);
+					setAnswer(typeof res?.answer === 'string' ? res.answer : '');
+					setPlan(res?.plan ?? null);
+					setResult(res?.result ?? null);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				} finally {
+					setLoading(false);
+				}
+			}, [question]);
+
+			const examples = [
+				'最近半小时 hall-restful 有没有报错',
+				'看看 /actuator/info 接口最近有没有异常调用',
+				'hall-restful 最近一小时的健康指标怎么样',
+			];
+
+			const answerCard = answer === '' ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: S.cardLabel }, translate('answerLabel')),
+				h('div', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.7, fontSize: 13 } }, answer));
+
+			const planLine = plan === null ? null : h('div', { style: { marginBottom: 10 } },
+				h('span', { style: S.chip }, translate('planLabel') + ' ' + String(plan.action ?? '')),
+				h('span', { style: { ...S.mono, color: COLORS.label2, marginLeft: 8, fontSize: 11 } }, JSON.stringify(plan.args ?? {})));
+
+			const hits = Array.isArray(result?.hits) ? result.hits.slice(0, 20) : [];
+			const resultView = hits.length === 0 ? null : h('div', { style: { marginBottom: 10 } },
+				h('div', { style: { marginBottom: 6 } }, h('span', { style: S.chip }, `命中 ${result.total ?? hits.length}`)),
+				h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
+					hits.map((hit, idx) => h(LogRow, {
+						key: idx,
+						hit,
+						open: false,
+						onToggle: () => {},
+						onOpenTrace: () => {},
+					}))));
+
+			return h('div', null,
+				h('div', { style: S.form },
+					h('input', {
+						style: S.input,
+						value: question,
+						placeholder: translate('askPlaceholder'),
+						onChange: (e) => setQuestion(e.target.value),
+						onKeyDown: (e) => { if (e.key === 'Enter') ask(); },
+					}),
+					h('button', { style: S.button(true), onClick: ask, disabled: loading, type: 'button' },
+						loading ? translate('asking') : translate('askButton'))),
+				h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' } },
+					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('askExamples')),
+					examples.map((ex, idx) => h('button', {
+						key: idx,
+						type: 'button',
+						style: S.button(false),
+						onClick: () => setQuestion(ex),
+					}, ex))),
+				h(ErrorBox, { message: error }),
+				loading ? h('div', { style: S.empty }, translate('asking')) : null,
+				answerCard,
+				planLine,
+				resultView);
+		}
+
 		//#endregion
 
 		//#region shell
@@ -892,7 +992,7 @@ window.__ModuleLoader__.load({
 							},
 						}, health.ok ? translate('connected') : `${translate('disconnected')}：${String(health.reason ?? '').slice(0, 60)}`),
 					h('div', { style: S.tabs },
-						[['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
+						[['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['ask', 'tabAsk'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
 							h('button', {
 								key,
 								style: S.tab(tab === key),
@@ -903,6 +1003,7 @@ window.__ModuleLoader__.load({
 					tab === 'logs' ? h(LogsTab, { onOpenTrace: openTrace }) : null,
 					tab === 'trace' ? h(TraceTab, { initialSerialNo: pendingTrace, onConsumed: consumePending }) : null,
 					tab === 'status' ? h(StatusTab, null) : null,
+					tab === 'ask' ? h(AskTab, null) : null,
 					tab === 'audit' ? h(AuditTab, null) : null));
 		}
 

@@ -11,7 +11,8 @@ import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js'
 import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
 
 export const name = 'log-insight';
-export const inject = ['tools', 'connection'];
+// llm 用于自然语言问答；tools 提供工具注册，connection 提供 Web RPC
+export const inject = ['tools', 'connection', 'llm'];
 
 /**
  * 截断长文本，保留前缀并注明原长度。
@@ -45,6 +46,7 @@ export function apply(ctx, config) {
   let session = null;
 
   const govConfig = config?.governance ?? {};
+  const llmConfig = config?.llm ?? {};
   let govSession = null;
 
   /** 惰性创建 Kibana 会话。 */
@@ -94,6 +96,201 @@ export function apply(ctx, config) {
       throw error;
     }
   }
+
+  //#region 自然语言问答
+
+  /** 意图解析提示词。 */
+  const PLANNER_PROMPT = [
+    '你是日志查询助手。把用户的问题转换成 JSON 查询计划，只输出 JSON，不要任何解释。',
+    '',
+    '可用动作与参数：',
+    '1. log_search — 查日志',
+    '   keywords: 字符串数组，多个词之间是「且」关系',
+    '   excludeKeywords: 字符串数组，排除包含这些词的日志',
+    '   services: 容器名数组，例如 hall-restful',
+    '   level: ERROR / WARN / INFO',
+    '   traceId: 流水号',
+    '   minutes: 时间范围（分钟），默认 30',
+    '   limit: 返回条数，默认 20',
+    '2. trace_search — 查调用链列表',
+    '   uri: 接口路径，例如 /hall/indexinfo/query',
+    '   keyword: 匹配入参、返回值或错误码',
+    '   service: 服务名',
+    '   type: http（正常调用）或 exception（异常调用）',
+    '   minutes: 时间范围（分钟）',
+    '   limit: 条数',
+    '3. trace_detail — 查单条链路详情',
+    '   serialNo: 流水号',
+    '4. service_status — 查服务健康指标',
+    '   service: 服务名',
+    '   minutes: 时间范围（分钟）',
+    '',
+    '示例：',
+    '问题：最近半小时 hall-restful 有没有报错',
+    '输出：{"action":"log_search","args":{"services":["hall-restful"],"level":"ERROR","minutes":30}}',
+    '',
+    '问题：看看 /hall/indexinfo/query 接口最近有没有异常调用',
+    '输出：{"action":"trace_search","args":{"uri":"/hall/indexinfo/query","type":"exception","minutes":30}}',
+  ].join('\n');
+
+  /** 结果解读提示词。 */
+  const ANSWER_PROMPT = [
+    '你是资深的 Java 后端与 SRE 工程师。根据日志或调用链的查询结果回答用户问题。',
+    '',
+    '要求：',
+    '- 用中文，先给结论，再补充依据',
+    '- 有报错时指出错误码与异常关键字，推测可能原因',
+    '- 链路场景指出瓶颈服务及其耗时占比',
+    '- 不要罗列原始 JSON，也不要复述全部日志',
+    '- 结果为空或信息不足时，说明还需要补充什么条件',
+  ].join('\n');
+
+  /**
+   * 调用一次模型，返回纯文本。
+   * @param {string} system 系统提示
+   * @param {string} user 用户内容
+   * @returns {Promise<string>} 模型输出
+   */
+  async function callModel(system, user) {
+    const llm = ctx.llm;
+    if (llm === undefined || typeof llm?.stream !== 'function') {
+      throw new Error('当前会话未启用模型服务，无法使用自然语言问答');
+    }
+    const route = await resolveLlmRoute(llm);
+    let text = '';
+    for await (const chunk of llm.stream({
+      provider: route.provider,
+      model: route.model,
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: system }] },
+        { role: 'user', content: [{ type: 'text', text: user }] },
+      ],
+    })) {
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') {
+        text += chunk.text;
+      }
+    }
+    return text.trim();
+  }
+
+  /**
+   * 选择模型路由：配置优先，否则取第一个提供方的第一个模型。
+   * @param {object} llm 模型服务
+   * @returns {Promise<{provider: string, model: string}>} 路由
+   */
+  async function resolveLlmRoute(llm) {
+    if (llmConfig.provider && llmConfig.model) {
+      return { provider: llmConfig.provider, model: llmConfig.model };
+    }
+    const providers = typeof llm.listProviders === 'function' ? llm.listProviders() : [];
+    for (const row of providers) {
+      if (typeof row?.id !== 'string') continue;
+      const models = typeof llm.listModels === 'function' ? await llm.listModels(row.id) : [];
+      const first = Array.isArray(models) ? models[0] : undefined;
+      if (typeof first?.id === 'string') {
+        return { provider: row.id, model: first.id };
+      }
+    }
+    throw new Error('未找到可用模型，请在插件配置里指定 llm.provider 与 llm.model');
+  }
+
+  /**
+   * 把模型输出解析成查询计划。
+   * @param {string} text 模型输出
+   * @returns {{action: string, args: object}} 查询计划
+   */
+  function parsePlan(text) {
+    const match = String(text).match(/\{[\s\S]*\}/);
+    if (match === null) {
+      throw new Error('模型没有返回查询计划，请换一种问法');
+    }
+    let value;
+    try {
+      value = JSON.parse(match[0]);
+    } catch {
+      throw new Error('模型返回的查询计划不是合法 JSON');
+    }
+    const action = String(value.action ?? '');
+    const allowed = ['log_search', 'trace_search', 'trace_detail', 'service_status'];
+    if (!allowed.includes(action)) {
+      throw new Error(`不支持的查询动作：${action || '空'}`);
+    }
+    const args = value.args !== null && typeof value.args === 'object' ? value.args : {};
+    return { action, args };
+  }
+
+  /**
+   * 执行查询计划。
+   * @param {{action: string, args: object}} plan 计划
+   * @param {string} env 环境
+   * @returns {Promise<object>} 查询结果
+   */
+  async function executePlan(plan, env) {
+    const minutes = Number(plan.args.minutes ?? plan.args.windowMinutes ?? defaults.windowMinutes);
+    const args = { ...plan.args, env: plan.args.env ?? env, windowMinutes: minutes };
+    switch (plan.action) {
+      case 'log_search':
+        return runLogSearch({ ...args, limit: Math.min(Number(args.limit ?? 20), defaults.maxHits ?? 200) });
+      case 'trace_search':
+        return runTraceSearch(args);
+      case 'trace_detail':
+        return runTraceDetail(args);
+      case 'service_status':
+        return runServiceStatus(args);
+      default:
+        throw new Error(`不支持的查询动作：${plan.action}`);
+    }
+  }
+
+  /**
+   * 把查询结果压成给模型阅读的摘要。
+   * @param {object} plan 查询计划
+   * @param {object} result 查询结果
+   * @returns {string} 摘要文本
+   */
+  function summarizeForModel(plan, result) {
+    if (result?.ok === false) return `查询失败：${result.reason ?? '未知原因'}`;
+    if (plan.action === 'log_search') {
+      const lines = (result.hits ?? []).slice(0, 20)
+        .map((hit, i) => `${i + 1}. [${hit.timestamp}] ${hit.service} ${hit.level}: ${truncate(hit.message, 300)}`);
+      return `共 ${result.total} 条，展示 ${lines.length} 条：\n${lines.join('\n') || '（无数据）'}`;
+    }
+    if (plan.action === 'trace_search') {
+      const lines = (result.items ?? []).slice(0, 20)
+        .map((x, i) => `${i + 1}. ${x.callTime ?? ''} ${x.service ?? ''} ${x.uri ?? ''} ${x.durationMs ?? 0}ms ${x.serialNo ?? ''}`);
+      return `共 ${result.total} 条，展示 ${lines.length} 条：\n${lines.join('\n') || '（无数据）'}`;
+    }
+    if (plan.action === 'trace_detail') {
+      const spans = (result.spans ?? []).slice(0, 40)
+        .map((s) => `${'  '.repeat(s.depth ?? 0)}${s.type} ${s.service ?? ''} ${s.uri ?? ''} ${s.durationMs ?? 0}ms${s.error ? ` 错误:${s.error}` : ''}`);
+      const bottleneck = result.bottleneck;
+      const hotspot = bottleneck === undefined || bottleneck === null
+        ? '未识别到瓶颈'
+        : `${bottleneck.span?.service ?? '—'} ${bottleneck.span?.uri ?? ''} 耗时 ${bottleneck.durationMs}ms（占 ${Math.round((bottleneck.share ?? 0) * 100)}%）`;
+      return `流水号 ${result.serialNo ?? ''}，段落 ${result.spans?.length ?? 0} 个，瓶颈：${hotspot}\n${spans.join('\n')}`;
+    }
+    return JSON.stringify(result).slice(0, 3000);
+  }
+
+  /**
+   * 自然语言问答：解析意图 → 执行查询 → 生成解读。
+   * @param {object} payload 请求参数
+   * @returns {Promise<object>} 问答结果
+   */
+  async function runAsk(payload) {
+    const question = String(payload?.question ?? '').trim();
+    if (question === '') return { ok: false, reason: '请输入问题' };
+    try {
+      const plan = parsePlan(await callModel(PLANNER_PROMPT, question));
+      const result = await executePlan(plan, payload?.env);
+      const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
+      return { ok: true, question, plan, answer, result };
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) };
+    }
+  }
+
+  //#endregion
 
   //#region 核心查询能力（工具与面板 RPC 共用）
 
@@ -495,6 +692,7 @@ export function apply(ctx, config) {
 
   /** 面板可调用的端点与处理函数映射。 */
   const ENDPOINTS = Object.freeze({
+    ask: runAsk,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',
