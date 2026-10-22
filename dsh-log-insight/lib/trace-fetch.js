@@ -41,6 +41,21 @@ export function flattenTree(nodes, depth = 0) {
       durationMs: Number(node.duration ?? 0),
       status: node.code ?? '',
       error: node.type === 'exception' ? String(node.message ?? '异常节点') : undefined,
+      // 供节点展开查看的明细，缺失时保持空值
+      method: node.method ?? '',
+      code: node.code ?? '',
+      ip: node.ip ?? '',
+      port: node.port ?? '',
+      thread: node.threadName ?? '',
+      timestamp: node.timestamp ?? null,
+      request: node.queryString ?? '',
+      response: node.response ?? '',
+      log: node.log ?? '',
+      level: node.level ?? '',
+      operationName: node.operationName ?? '',
+      url: node.url ?? '',
+      app: node.app ?? '',
+      fail: node.fail ?? 0,
     });
     if (Array.isArray(node.procedure) && node.procedure.length > 0) {
       out.push(...flattenTree(node.procedure, depth + 1));

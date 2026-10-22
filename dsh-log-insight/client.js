@@ -548,6 +548,72 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 链路 Tab。 */
+		/** 截断长文本，保留可读预览。 */
+		function truncateText(text, max) {
+			if (typeof text !== 'string') return '';
+			if (text.length <= max) return text;
+			return `${text.slice(0, max)}…（共 ${text.length} 字符）`;
+		}
+
+		/** 链路节点行：点击展开该节点的明细。 */
+		function SpanRow({ span, maxDuration, isBottleneck }) {
+			const [open, setOpen] = useState(false);
+			const isError = span.type === 'exception';
+
+			const fields = [
+				['类型', span.type],
+				['服务', span.service],
+				['接口', span.uri],
+				['方法', span.method],
+				['状态码', span.code === '' ? span.status : span.code],
+				['耗时', span.durationMs === undefined ? '' : `${span.durationMs}ms`],
+				['应用', span.app],
+				['操作名', span.operationName],
+				['URL', span.url],
+				['线程', span.thread],
+				['IP', span.ip],
+				['端口', span.port],
+				['时间', span.timestamp === null || span.timestamp === undefined ? '' : new Date(Number(span.timestamp)).toISOString().replace('T', ' ').slice(0, 19)],
+				['入参', span.request],
+				['返回值', span.response],
+				['日志', span.log],
+				['错误', span.error],
+			].filter(([, value]) => value !== undefined && value !== null && String(value) !== '');
+
+			const detail = open ? h('div', {
+				style: {
+					padding: '8px 12px 10px',
+					borderTop: `1px solid ${COLORS.border1}`,
+					background: COLORS.layer1,
+				},
+			}, fields.map(([label, value], idx) => h('div', {
+				key: idx,
+				style: { display: 'flex', gap: 10, marginBottom: 4 },
+			},
+				h('span', { style: { fontSize: 11, color: COLORS.label2, width: 60, flexShrink: 0, textAlign: 'right' } }, label),
+				h('span', {
+					style: { ...S.mono, fontSize: 11, color: COLORS.label1, wordBreak: 'break-all', whiteSpace: 'pre-wrap' },
+				}, truncateText(String(value), 2000))))) : null;
+
+			return h('div', null,
+				h('div', {
+					style: {
+						...S.row,
+						paddingLeft: 10 + span.depth * 18,
+						cursor: 'pointer',
+						background: isBottleneck ? COLORS.layer2 : 'transparent',
+					},
+					onClick: () => setOpen(!open),
+				},
+					h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 12 } }, open ? '▾' : '▸'),
+					h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 145 } }, span.type),
+					h('span', { style: { ...S.mono, color: isError ? COLORS.error : COLORS.label1, flexShrink: 0, width: 130, overflow: 'hidden', textOverflow: 'ellipsis' } }, span.service || '—'),
+					h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, span.uri || ''),
+					h('div', { style: S.bar }, h('div', { style: S.barFill((span.durationMs / maxDuration) * 100, isError ? COLORS.error : (isBottleneck ? COLORS.warn : COLORS.brand)) })),
+					h('span', { style: { ...S.mono, width: 60, textAlign: 'right', flexShrink: 0, color: isBottleneck ? COLORS.warn : COLORS.label2 } }, fmtMs(span.durationMs))),
+				detail);
+		}
+
 		/** 渲染链路详情：瓶颈卡片 + 段落树 + 异常信息。 */
 		function buildTraceDetail(detail) {
 			const spans = detail.spans ?? [];
@@ -585,23 +651,12 @@ window.__ModuleLoader__.load({
 				h('button', { style: S.button(false), type: 'button', onClick: openPlatform }, translate('openInPlatform')),
 				h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('exportPdfHint')));
 
-			const rows = spans.map((span, idx) => {
-				const isBottleneck = bottleneck && span.service === bottleneck.span?.service && span.durationMs === bottleneck.durationMs;
-				const isError = span.type === 'exception';
-				return h('div', {
-					key: idx,
-					style: {
-						...S.row,
-						paddingLeft: 10 + span.depth * 18,
-						background: isBottleneck ? COLORS.layer2 : 'transparent',
-					},
-				},
-					h('span', { style: { ...S.mono, color: COLORS.label2, flexShrink: 0, width: 150 } }, span.type),
-					h('span', { style: { ...S.mono, color: isError ? COLORS.error : COLORS.label1, flexShrink: 0, width: 130, overflow: 'hidden', textOverflow: 'ellipsis' } }, span.service || '—'),
-					h('span', { style: { ...S.mono, color: COLORS.label2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, span.uri || ''),
-					h('div', { style: S.bar }, h('div', { style: S.barFill((span.durationMs / maxDuration) * 100, isError ? COLORS.error : (isBottleneck ? COLORS.warn : COLORS.brand)) })),
-					h('span', { style: { ...S.mono, width: 60, textAlign: 'right', flexShrink: 0, color: isBottleneck ? COLORS.warn : COLORS.label2 } }, fmtMs(span.durationMs)));
-			});
+			const rows = spans.map((span, idx) => h(SpanRow, {
+				key: idx,
+				span,
+				maxDuration,
+				isBottleneck: bottleneck && span.service === bottleneck.span?.service && span.durationMs === bottleneck.durationMs,
+			}));
 
 			const exceptionLine = spans.some((x) => x.type === 'exception')
 				? h('div', { style: S.hint }, spans.filter((x) => x.type === 'exception').map((x) => x.error).join(' | '))
