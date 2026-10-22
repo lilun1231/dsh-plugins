@@ -9,6 +9,7 @@ import { searchCallChains, aggregateServiceStatus } from './lib/governance-query
 import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.js';
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
 import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
+import { searchJava, readSnippet, buildKeywords, pickEndpoint } from './lib/code-scan.js';
 
 export const name = 'log-insight';
 // llm 用于自然语言问答；tools 提供工具注册，connection 提供 Web RPC
@@ -47,6 +48,7 @@ export function apply(ctx, config) {
 
   const govConfig = config?.governance ?? {};
   const llmConfig = config?.llm ?? {};
+  const projects = config?.projects ?? {};
   let govSession = null;
 
   /** 惰性创建 Kibana 会话。 */
@@ -285,6 +287,132 @@ export function apply(ctx, config) {
       const result = await executePlan(plan, payload?.env);
       const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
       return { ok: true, question, plan, answer, result };
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) };
+    }
+  }
+
+  //#endregion
+
+  //#region 接口分析
+
+  /** 接口分析提示词。 */
+  const ANALYZE_PROMPT = [
+    '你是 Java 后端架构师。根据给定代码分析接口的执行逻辑，输出时序步骤。',
+    '',
+    '只输出 JSON，不要任何解释，格式如下：',
+    '{',
+    '  "title": "接口用途，一句话",',
+    '  "summary": "两三句话说明业务逻辑",',
+    '  "steps": [',
+    '    {"from":"客户端","to":"hall-restful","label":"POST /rest/app/trade/sqnews/likestate/update","kind":"http","uri":"/rest/app/trade/sqnews/likestate/update","note":"接口入口"},',
+    '    {"from":"SQNewsController","to":"ISQNewsDetailLikeStateUpdateService","label":"updateSqNewsLikeState()","kind":"service","note":"Lisa RPC 调用"},',
+    '    {"from":"SQNewsDetailLikeStateUpdateServiceImpl","to":"数据库","label":"更新点赞状态","kind":"dao","note":""}',
+    '  ]',
+    '}',
+    '',
+    '规则：',
+    '- 第一步固定是客户端调用该接口，kind 用 http，uri 填完整接口路径（含 Controller 上的类级前缀，如 /rest/...）',
+    '- 之后按调用顺序列出 Controller → Service → DAO 或外部系统',
+    '- 调用了其他系统的 HTTP 接口时用 kind=external，并在 uri 里给出该接口路径',
+    '- 代码里没有依据的步骤不要编造；不确定时把 note 写成「需结合实现确认」',
+  ].join('\n');
+
+  /**
+   * 从代码片段里提取被注入的 Service 接口名。
+   * @param {string} snippet 代码片段
+   * @returns {string[]} 接口名列表
+   */
+  function extractServiceNames(snippet) {
+    const names = new Set();
+    const pattern = /\bI[A-Z][A-Za-z0-9]*Service\b/g;
+    let matched;
+    while ((matched = pattern.exec(snippet)) !== null) {
+      names.add(matched[0]);
+      if (names.size >= 4) break;
+    }
+    return [...names];
+  }
+
+  /**
+   * 收集接口分析所需的代码上下文：Controller 片段加一层 Service 实现。
+   * @param {string} repoPath 仓库根目录
+   * @param {string} uri 接口路径
+   * @returns {{endpoint: object | null, context: string}} 定位结果与上下文
+   */
+  function collectContext(repoPath, uri) {
+    for (const keyword of buildKeywords(uri)) {
+      const picked = pickEndpoint(searchJava(repoPath, keyword));
+      if (picked === null) continue;
+      const main = readSnippet(picked.file, picked.line, 10, 130);
+      const parts = [`### Controller：${picked.file.replace(repoPath, '')}\n${main.snippet}`];
+      for (const serviceName of extractServiceNames(main.snippet)) {
+        const implHits = searchJava(repoPath, `implements ${serviceName}`, 5);
+        if (implHits.length === 0) continue;
+        const impl = readSnippet(implHits[0].file, 1, 0, 90);
+        parts.push(`### Service 实现：${implHits[0].file.replace(repoPath, '')}\n${impl.snippet}`);
+        if (parts.length >= 3) break;
+      }
+      return { endpoint: picked, context: parts.join('\n\n') };
+    }
+    return { endpoint: null, context: '' };
+  }
+
+  /**
+   * 解析模型返回的时序分析。
+   * @param {string} text 模型输出
+   * @returns {{title: string, summary: string, steps: Array<object>}} 分析结果
+   */
+  function parseAnalysis(text) {
+    const matched = String(text).match(/\{[\s\S]*\}/);
+    if (matched === null) throw new Error('模型没有返回时序分析');
+    let value;
+    try {
+      value = JSON.parse(matched[0]);
+    } catch {
+      throw new Error('时序分析不是合法 JSON');
+    }
+    const steps = Array.isArray(value.steps) ? value.steps.map((step, index) => ({
+      seq: index + 1,
+      from: String(step?.from ?? ''),
+      to: String(step?.to ?? ''),
+      label: String(step?.label ?? ''),
+      kind: String(step?.kind ?? 'service'),
+      uri: typeof step?.uri === 'string' ? step.uri : '',
+      note: typeof step?.note === 'string' ? step.note : '',
+    })) : [];
+    return { title: String(value.title ?? ''), summary: String(value.summary ?? ''), steps };
+  }
+
+  /**
+   * 接口分析：定位代码后交由模型生成时序步骤。
+   * @param {object} payload 请求参数，含 project 与 uri
+   * @returns {Promise<object>} 分析结果
+   */
+  async function runAnalyze(payload) {
+    const project = String(payload?.project ?? '');
+    const uri = String(payload?.uri ?? '').trim();
+    if (uri === '') return { ok: false, reason: '请输入接口地址' };
+    const repoPath = projects[project];
+    if (typeof repoPath !== 'string' || repoPath === '') {
+      return { ok: false, reason: `未配置项目路径：${project}` };
+    }
+    try {
+      const { endpoint, context } = collectContext(repoPath, uri);
+      if (endpoint === null) {
+        return { ok: false, reason: `在 ${project} 里没有找到接口 ${uri}，请检查项目或路径` };
+      }
+      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 12000)].join('\n');
+      const analysis = parseAnalysis(await callModel(ANALYZE_PROMPT, prompt));
+      return {
+        ok: true,
+        project,
+        uri,
+        title: analysis.title,
+        summary: analysis.summary,
+        steps: analysis.steps,
+        source: { file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
+      };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }
@@ -693,6 +821,7 @@ export function apply(ctx, config) {
   /** 面板可调用的端点与处理函数映射。 */
   const ENDPOINTS = Object.freeze({
     ask: runAsk,
+    analyze: runAnalyze,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',

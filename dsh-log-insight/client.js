@@ -28,7 +28,13 @@ window.__ModuleLoader__.load({
 		const zh = {
 			nav: '日志洞察',
 			title: '日志洞察',
-			tabLogs: '日志',
+			tabLogs: '日志查询',
+			tabAnalyze: '接口分析',
+			projectLabel: '项目',
+			analyzeBtn: '分析',
+			analyzing: '分析中…（读取代码并调用模型，约 10-30 秒）',
+			sequenceTitle: '调用时序',
+			clickToSearch: '蓝色接口可点击，直接跳转日志查询',
 			tabTrace: '调用链',
 			tabStatus: '服务状态',
 			tabAsk: '问一问',
@@ -106,7 +112,13 @@ window.__ModuleLoader__.load({
 		const en = {
 			nav: 'Log Insight',
 			title: 'Log Insight',
-			tabLogs: 'Logs',
+			tabLogs: 'Log query',
+			tabAnalyze: 'API analysis',
+			projectLabel: 'Project',
+			analyzeBtn: 'Analyze',
+			analyzing: 'Analyzing… (reads code, calls model, 10-30s)',
+			sequenceTitle: 'Sequence',
+			clickToSearch: 'Blue endpoints jump to log query',
 			tabTrace: 'Traces',
 			tabStatus: 'Status',
 			tabAsk: 'Ask',
@@ -356,6 +368,7 @@ window.__ModuleLoader__.load({
 			status: { service: 'hall-restful', minutes: 60, stats: null },
 			audit: { items: null },
 			ask: { question: '', answer: '', plan: null, result: null },
+			analyze: { project: 'hall-micro-serv-3', uri: '', data: null },
 		};
 
 		/** 按时间范围生成 ISO 起止。 */
@@ -439,7 +452,7 @@ window.__ModuleLoader__.load({
 
 		//#region tabs
 		/** 日志 Tab。 */
-		function LogsTab({ onOpenTrace }) {
+		function LogsTab({ pendingQuery, onConsumed, onOpenTrace }) {
 			const [keyword, setKeyword] = useState(memory.logs.keyword);
 			const [services, setServices] = useState(memory.logs.services);
 			const [exclude, setExclude] = useState(memory.logs.exclude);
@@ -454,6 +467,39 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				memory.logs = { keyword, services, exclude, level, env, minutes, result };
 			}, [keyword, services, exclude, level, env, minutes, result]);
+
+			// 接口分析里点击某个接口后，带上关键字直接查一次
+			useEffect(() => {
+				if (pendingQuery === null || typeof pendingQuery !== 'object') return;
+				const incoming = String(pendingQuery.keyword ?? '');
+				if (incoming === '') {
+					onConsumed();
+					return;
+				}
+				setKeyword(incoming);
+				setServices('');
+				onConsumed();
+				setLoading(true);
+				setError('');
+				(async () => {
+					try {
+						const range = rangeOf(minutes);
+						setResult(await callRpc('search', {
+							keywords: [incoming],
+							from: range.from,
+							to: range.to,
+							limit: 20,
+						}));
+						setExpanded({});
+					} catch (e) {
+						setError(String(e?.message ?? e));
+					} finally {
+						setLoading(false);
+					}
+				})();
+				// 仅在外部跳转请求变化时触发
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, [pendingQuery]);
 
 			const run = useCallback(async () => {
 				setLoading(true);
@@ -955,6 +1001,105 @@ window.__ModuleLoader__.load({
 								}, item.ok ? translate('okLabel') : `${translate('failLabel')} ${String(item.error ?? '').slice(0, 18)}`))))));
 		}
 
+		/** 接口分析 Tab：选定项目与接口，定位代码后生成调用时序。 */
+		function AnalyzeTab({ onOpenLogs }) {
+			const [project, setProject] = useState(memory.analyze.project);
+			const [uri, setUri] = useState(memory.analyze.uri);
+			const [loading, setLoading] = useState(false);
+			const [error, setError] = useState('');
+			const [data, setData] = useState(memory.analyze.data);
+
+			useEffect(() => {
+				memory.analyze = { project, uri, data };
+			}, [project, uri, data]);
+
+			const run = useCallback(async () => {
+				const value = uri.trim();
+				if (value === '') return;
+				setLoading(true);
+				setError('');
+				try {
+					setData(await callRpc('analyze', { project, uri: value }, 120000));
+				} catch (e) {
+					setError(String(e?.message ?? e));
+					setData(null);
+				} finally {
+					setLoading(false);
+				}
+			}, [project, uri]);
+
+			const header = data === null ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, data.title || '—'),
+				h('div', { style: { fontSize: 12, color: COLORS.label2, lineHeight: 1.7 } }, data.summary || ''),
+				h('div', { style: { ...S.mono, fontSize: 11, color: COLORS.label2, marginTop: 6 } },
+					`${data.project ?? ''} · ${data.source?.file ?? ''}:${data.source?.line ?? ''}`));
+
+			const steps = data === null || !Array.isArray(data.steps) ? [] : data.steps;
+			const sequence = data === null ? null : h('div', null,
+				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' } },
+					h('span', { style: S.chip }, translate('sequenceTitle')),
+					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('clickToSearch'))),
+				steps.length === 0
+					? h('div', { style: S.empty }, translate('noResult'))
+					: h('div', { style: { border: `1px solid ${COLORS.border1}`, borderRadius: 8, overflow: 'hidden' } },
+						steps.map((step, idx) => {
+							const linkable = typeof step.uri === 'string' && step.uri !== '';
+							return h('div', {
+								key: idx,
+								style: { ...S.row, gap: 8, alignItems: 'center' },
+							},
+								h('span', { style: { ...S.mono, color: COLORS.label2, width: 20, flexShrink: 0 } }, String(step.seq)),
+								h('span', { style: { ...S.mono, flexShrink: 0, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.from),
+								h('span', { style: { color: COLORS.label2, flexShrink: 0 } }, '→'),
+								h('span', { style: { ...S.mono, flexShrink: 0, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.to),
+								linkable
+									? h('button', {
+										type: 'button',
+										onClick: () => onOpenLogs(step.uri),
+										style: {
+											background: 'none',
+											border: 'none',
+											padding: 0,
+											cursor: 'pointer',
+											color: COLORS.brand,
+											fontWeight: 700,
+											fontSize: 12,
+											textAlign: 'left',
+											textDecoration: 'underline',
+											flex: 1,
+											overflow: 'hidden',
+											textOverflow: 'ellipsis',
+											whiteSpace: 'nowrap',
+										},
+									}, step.label)
+									: h('span', { style: { ...S.mono, flex: 1, color: COLORS.label1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, step.label),
+								step.note === '' ? null : h('span', { style: { fontSize: 11, color: COLORS.label2, flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' } }, step.note));
+						})));
+
+			return h('div', null,
+				h('div', { style: S.form },
+					h(Field, { label: translate('projectLabel') },
+						h('select', {
+							style: S.input,
+							value: project,
+							onChange: (e) => setProject(e.target.value),
+						}, ['hall-user', 'hall-micro-serv-3'].map((v) => h('option', { key: v, value: v }, v)))),
+					h(Field, { label: translate('uriLabel') },
+						h('input', {
+							style: S.input,
+							value: uri,
+							placeholder: translate('uriPlaceholder'),
+							onChange: (e) => setUri(e.target.value),
+							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
+						})),
+					h('button', { style: S.button(true), onClick: run, disabled: loading, type: 'button' },
+						loading ? translate('analyzing') : translate('analyzeBtn'))),
+				h(ErrorBox, { message: error }),
+				loading ? h('div', { style: S.empty }, translate('analyzing')) : null,
+				header,
+				sequence);
+		}
+
 		/** 自然语言问答 Tab：描述问题，由模型解析并执行查询后给出解读。 */
 		function AskTab() {
 			const [question, setQuestion] = useState(memory.ask.question);
@@ -1060,6 +1205,7 @@ window.__ModuleLoader__.load({
 				return () => { alive = false; };
 			}, []);
 			const [pendingTrace, setPendingTrace] = useState('');
+			const [pendingLog, setPendingLog] = useState(null);
 
 			const openTrace = useCallback((serialNo) => {
 				setPendingTrace(serialNo);
@@ -1067,6 +1213,14 @@ window.__ModuleLoader__.load({
 			}, []);
 
 			const consumePending = useCallback(() => setPendingTrace(''), []);
+
+			/** 接口分析点接口后跳到日志查询并自动搜索。 */
+			const openLogs = useCallback((keyword) => {
+				setPendingLog({ keyword });
+				setTab('logs');
+			}, []);
+
+			const consumeLog = useCallback(() => setPendingLog(null), []);
 
 			return h('div', { style: S.root },
 				h('div', { style: S.header },
@@ -1081,7 +1235,7 @@ window.__ModuleLoader__.load({
 							},
 						}, health.ok ? translate('connected') : `${translate('disconnected')}：${String(health.reason ?? '').slice(0, 60)}`),
 					h('div', { style: S.tabs },
-						[['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['ask', 'tabAsk'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
+						[['analyze', 'tabAnalyze'], ['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['ask', 'tabAsk'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
 							h('button', {
 								key,
 								style: S.tab(tab === key),
@@ -1089,7 +1243,8 @@ window.__ModuleLoader__.load({
 								type: 'button',
 							}, translate(labelKey))))),
 				h('div', { style: S.body },
-					tab === 'logs' ? h(LogsTab, { onOpenTrace: openTrace }) : null,
+					tab === 'analyze' ? h(AnalyzeTab, { onOpenLogs: openLogs }) : null,
+					tab === 'logs' ? h(LogsTab, { pendingQuery: pendingLog, onConsumed: consumeLog, onOpenTrace: openTrace }) : null,
 					tab === 'trace' ? h(TraceTab, { initialSerialNo: pendingTrace, onConsumed: consumePending }) : null,
 					tab === 'status' ? h(StatusTab, null) : null,
 					tab === 'ask' ? h(AskTab, null) : null,
