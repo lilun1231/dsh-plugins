@@ -687,7 +687,13 @@ export function apply(ctx, config) {
     }
 
     const events = eventsOf(agent.session);
-    for (let index = events.length - 1; index >= 0; index -= 1) {
+
+    // 助手回复可能被拆成多条增量事件，单条里没有完整 JSON：
+    // 从后往前累积拼接，每拼一段就尝试解析，命中即返回
+    let buffer = '';
+    let attempts = 0;
+    let preview = '';
+    for (let index = events.length - 1; index >= 0 && attempts < 60; index -= 1) {
       const event = events[index];
       if (event?.type !== 'assistant/message') continue;
       const payload = event.data?.message ?? event.data;
@@ -698,8 +704,11 @@ export function apply(ctx, config) {
         .map((block) => block.text)
         .join('');
       if (text.trim() === '') continue;
+      if (preview === '') preview = text.trim().slice(0, 60);
+      buffer = `${text}\n${buffer}`;
+      attempts += 1;
       try {
-        const parsed = parseSessionReply(text);
+        const parsed = parseSessionReply(buffer);
         if (parsed.steps.length > 0) {
           return {
             ok: true,
@@ -711,15 +720,31 @@ export function apply(ctx, config) {
           };
         }
       } catch {
-        // 这一条不是分析结果，继续往前找
+        // 还没拼出完整 JSON，继续往前累积
       }
     }
+
+    // 拿不到结构化结果时，把最近一段助手文本原样返回，至少能看到内容
+    if (buffer.trim() !== '') {
+      return {
+        ok: true,
+        title: '',
+        summary: '',
+        steps: [],
+        endpoints: [],
+        text: cleanText(buffer.trim().slice(-6000)),
+        source: { mode: 'session-text', sessionId: analyzeSessionId },
+      };
+    }
+
     const assistantCount = events.filter((event) => event?.type === 'assistant/message').length;
     return {
       ok: false,
-      reason: events.length === 0
-        ? '读不到会话事件（会话可能不在线或尚未加载）'
-        : `会话里有 ${events.length} 条事件、${assistantCount} 条助手回复，但没有解析出分析结果。请确认最新一次回复里包含 steps 的 JSON 代码块`,
+      reason: [
+        `会话里有 ${events.length} 条事件、${assistantCount} 条助手回复，没有找到含 steps 的分析结果。`,
+        preview === '' ? '' : `最近一条回复开头：${cleanText(preview)}…`,
+        '请点「分析」等它跑完再读取，或确认会话里最新回复带 steps 的 JSON。',
+      ].filter((line) => line !== '').join(' '),
     };
   }
 

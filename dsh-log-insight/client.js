@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
 			loadLatest: '读取最新分析',
 			latestHint: '切走页面后请求会中断，可从这里取回会话里最近一次分析结果',
 			noLatest: '会话里还没有分析结果',
+			textOnly: '会话里最新一条是自然语言回复，不是结构化结果，已原样展示',
 			analyzing: '分析中…（读取代码并调用模型，约 10-30 秒）',
 			sequenceTitle: '调用时序',
 			clickToSearch: '蓝色接口可点击，直接跳转日志查询',
@@ -122,6 +123,7 @@ window.__ModuleLoader__.load({
 			loadLatest: 'Load latest',
 			latestHint: 'Leaving the page drops the running request — fetch the latest result from the session here',
 			noLatest: 'No analysis result in the session yet',
+			textOnly: 'The latest reply is plain text, not a structured result — shown as-is',
 			analyzing: 'Analyzing… (reads code, calls model, 10-30s)',
 			sequenceTitle: 'Sequence',
 			clickToSearch: 'Blue endpoints jump to log query',
@@ -1481,11 +1483,33 @@ window.__ModuleLoader__.load({
 
 			const endpoints = data === null || !Array.isArray(data.endpoints) ? [] : data.endpoints;
 			const steps = data === null || !Array.isArray(data.steps) ? [] : data.steps;
+			const rawText = data !== null && typeof data.text === 'string' ? data.text : '';
+			const body = steps.length > 0
+				? h(StepTimeline, { steps, endpoints, onOpenLogs })
+				: (rawText !== ''
+					? h('div', null,
+						h('div', { style: { fontSize: 11, color: COLORS.label2, marginBottom: 6 } }, translate('textOnly')),
+						h('pre', {
+							style: {
+								...S.mono,
+								fontSize: 11.5,
+								lineHeight: 1.7,
+								whiteSpace: 'pre-wrap',
+								wordBreak: 'break-word',
+								margin: 0,
+								padding: 10,
+								borderRadius: 6,
+								background: COLORS.layer2,
+								maxHeight: 420,
+								overflow: 'auto',
+							},
+						}, rawText))
+					: h('div', { style: S.empty }, translate('noResult')));
 			const sequence = data === null ? null : h('div', null,
 				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' } },
 					h('span', { style: S.chip }, translate('sequenceTitle')),
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('clickToSearch'))),
-				h(StepTimeline, { steps, endpoints, onOpenLogs }));
+				body);
 
 			return h('div', null,
 				h('div', { style: S.form },
