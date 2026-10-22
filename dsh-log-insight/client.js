@@ -1353,7 +1353,7 @@ window.__ModuleLoader__.load({
 				setError('');
 				(async () => {
 					try {
-						setData(await callRpc('analyze', { project, uri: text }, 120000));
+						setData(await callRpc('analyze', { project, uri: text }, 300000));
 					} catch (e) {
 						setError(String(e?.message ?? e));
 						setData(null);
@@ -1371,7 +1371,7 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setError('');
 				try {
-					setData(await callRpc('analyze', { project, uri: value }, 120000));
+					setData(await callRpc('analyze', { project, uri: value }, 300000));
 				} catch (e) {
 					setError(String(e?.message ?? e));
 					setData(null);

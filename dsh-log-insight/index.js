@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { KibanaSession } from './lib/kibana-auth.js';
@@ -49,6 +50,7 @@ export function apply(ctx, config) {
   const govConfig = config?.governance ?? {};
   const llmConfig = config?.llm ?? {};
   const projects = config?.projects ?? {};
+  const analyzeSessionId = typeof config?.analyzeSessionId === 'string' ? config.analyzeSessionId : '';
   let govSession = null;
 
   /** 惰性创建 Kibana 会话。 */
@@ -294,6 +296,132 @@ export function apply(ctx, config) {
 
   //#endregion
 
+  //#region 会话派发
+
+  /**
+   * 取会话当前事件列表。
+   * @param {object} session 会话对象
+   * @returns {Array<object>} 事件数组
+   */
+  function eventsOf(session) {
+    if (session === null || session === undefined) return [];
+    if (Array.isArray(session.events)) return session.events;
+    if (typeof session.snapshotEvents === 'function') {
+      const value = session.snapshotEvents();
+      return Array.isArray(value) ? value : [];
+    }
+    return [];
+  }
+
+  /**
+   * 把一段任务发给指定会话，等它产出 assistant 文本后返回。
+   * @param {string} sessionId 目标会话 id
+   * @param {string} task 任务文本
+   * @param {number} timeoutMs 等待上限
+   * @returns {Promise<string>} 会话最终文本
+   */
+  async function askSession(sessionId, task, timeoutMs = 260000) {
+    let agents;
+    try {
+      agents = typeof ctx?.get === 'function' ? ctx.get('agents') : ctx?.agents;
+    } catch {
+      agents = undefined;
+    }
+    if (agents === undefined || agents === null || typeof agents.get !== 'function') {
+      throw new Error('当前环境不支持会话派发（缺少 agents 服务）');
+    }
+    const agent = agents.get(sessionId);
+    if (agent === null || agent === undefined) {
+      throw new Error(`会话 ${sessionId} 不在线，请先在 DSH 里打开它`);
+    }
+
+    const before = eventsOf(agent.session).reduce((max, event) => (typeof event?.seq === 'number' && event.seq > max ? event.seq : max), 0);
+    agent.followup({
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text: task }],
+      source: { kind: 'user' },
+    });
+
+    const deadline = Date.now() + timeoutMs;
+    let text = '';
+    let ended = false;
+    while (Date.now() < deadline) {
+      for (const event of eventsOf(agent.session)) {
+        if (typeof event?.seq !== 'number' || event.seq <= before) continue;
+        if (event.type === 'assistant/message') {
+          const blocks = event.data?.message?.content;
+          if (Array.isArray(blocks)) {
+            const joined = blocks
+              .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+              .map((block) => block.text)
+              .join('');
+            if (joined.trim() !== '') text = joined;
+          }
+        }
+        if (event.type === 'turn/end') ended = true;
+      }
+      if (ended && text !== '') break;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    if (text === '') throw new Error('会话没有返回内容（可能仍在分析，请到该会话查看）');
+    return text;
+  }
+
+  /**
+   * 组织交给会话的分析任务说明。
+   * @param {string} project 项目名
+   * @param {string} repoPath 仓库路径
+   * @param {string} uri 接口路径
+   * @returns {string} 任务文本
+   */
+  function buildSessionTask(project, repoPath, uri) {
+    return [
+      `请分析这个接口的完整执行链路：${uri}`,
+      `项目：${project}；代码仓库：${repoPath}`,
+      '',
+      '要求：',
+      '1. 从 Controller 入口开始逐层向下追，不要只看一层：Controller → Service 实现 → 配置类（@Bean + @LisaService 生成的服务）→ 中台调用（setFuncNo 的功能号）。',
+      '2. 每条调用写明方法名、参数或条件，关键判断与组装逻辑用 Note 说明，并行调用用 par/and 表示。',
+      '3. 在回复最后输出一个 JSON 代码块（用三个反引号包住，标注 json），结构：',
+      '{"title":"一句话用途","summary":"两三句业务逻辑","mermaid":"sequenceDiagram\\n...","endpoints":[{"label":"GET /xxx","uri":"/xxx","kind":"http"}]}',
+      '4. endpoints 列出所有可查日志的入口：HTTP 接口给完整路径，中台调用给功能号（kind 用 middle）。',
+      '5. mermaid 里出现的文案要与 endpoints 的 label 保持一致。',
+      '6. 只写代码里有依据的调用，不确定的用 Note 标注。',
+    ].join('\n');
+  }
+
+  /**
+   * 从会话回复里提取 JSON 结果。
+   * @param {string} text 会话文本
+   * @returns {object} 解析结果
+   */
+  function parseSessionReply(text) {
+    const fenced = String(text).match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const raw = fenced !== null ? fenced[1] : String(text);
+    const matched = raw.match(/\{[\s\S]*\}/);
+    if (matched === null) throw new Error('会话没有返回可解析的结果');
+    let value;
+    try {
+      value = JSON.parse(matched[0]);
+    } catch {
+      throw new Error('会话返回的结果不是合法 JSON');
+    }
+    const endpoints = Array.isArray(value.endpoints)
+      ? value.endpoints
+        .map((item) => ({ label: String(item?.label ?? ''), uri: String(item?.uri ?? ''), kind: String(item?.kind ?? 'http') }))
+        .filter((item) => item.uri !== '')
+      : [];
+    return {
+      title: String(value.title ?? ''),
+      summary: String(value.summary ?? ''),
+      mermaid: typeof value.mermaid === 'string' ? value.mermaid : '',
+      endpoints,
+    };
+  }
+
+  //#endregion
+
   //#region 接口分析
 
   /** 接口分析提示词。 */
@@ -445,6 +573,28 @@ export function apply(ctx, config) {
     if (typeof repoPath !== 'string' || repoPath === '') {
       return { ok: false, reason: `未配置项目路径：${project}` };
     }
+    // 优先委派给固定会话：它有完整工具，能逐层读代码，也便于排查思维链
+    if (analyzeSessionId !== '' && payload?.via !== 'local') {
+      try {
+        const reply = await askSession(analyzeSessionId, buildSessionTask(project, repoPath, uri));
+        const parsed = parseSessionReply(reply);
+        if (parsed.mermaid !== '') {
+          return {
+            ok: true,
+            project,
+            uri,
+            title: parsed.title,
+            summary: parsed.summary,
+            mermaid: parsed.mermaid,
+            endpoints: parsed.endpoints,
+            source: { mode: 'session', sessionId: analyzeSessionId },
+          };
+        }
+      } catch {
+        // 会话不可用或超时，退回本地分析，面板不因会话问题而不可用
+      }
+    }
+
     try {
       const { endpoint, context } = collectContext(repoPath, uri);
       if (endpoint === null) {
@@ -460,7 +610,7 @@ export function apply(ctx, config) {
         summary: analysis.summary,
         mermaid: analysis.mermaid,
         endpoints: analysis.endpoints,
-        source: { file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
+        source: { mode: 'local', file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
       };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
