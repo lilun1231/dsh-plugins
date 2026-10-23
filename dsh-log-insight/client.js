@@ -393,6 +393,45 @@ window.__ModuleLoader__.load({
 			analyze: { project: 'hall-micro-serv-3', uri: '', data: null },
 		};
 
+		/**
+		 * 面板级错误边界。渲染异常时显示错误内容，避免整个面板白屏、也便于定位。
+		 */
+		class PanelErrorBoundary extends React.Component {
+			constructor(props) {
+				super(props);
+				this.state = { error: null };
+			}
+
+			static getDerivedStateFromError(error) {
+				return { error };
+			}
+
+			componentDidCatch(error, info) {
+				// 控制台留一份，方便在浏览器里看完整堆栈
+				if (typeof console !== 'undefined' && typeof console.error === 'function') {
+					console.error('[log-insight] 渲染失败', error, info);
+				}
+			}
+
+			render() {
+				if (this.state.error === null) return this.props.children;
+				return h('div', { style: { padding: 16, fontSize: 12 } },
+					h('div', { style: { fontWeight: 600, marginBottom: 8, color: COLORS.error } }, '面板渲染出错'),
+					h('pre', {
+						style: {
+							...S.mono,
+							whiteSpace: 'pre-wrap',
+							wordBreak: 'break-word',
+							background: COLORS.layer2,
+							padding: 10,
+							borderRadius: 6,
+							margin: 0,
+						},
+					}, String(this.state.error?.stack ?? this.state.error ?? '')),
+					h('div', { style: { marginTop: 10, color: COLORS.label2 } }, '把这段内容发给我即可定位'));
+			}
+		}
+
 		/** 按时间范围生成 ISO 起止。 */
 		function rangeOf(minutes) {
 			const to = new Date();
@@ -1644,10 +1683,11 @@ window.__ModuleLoader__.load({
 					locale: NS,
 				}, PanelIcon));
 
+				// 外面套一层错误边界：任何渲染异常都显示在面板里，而不是整页白屏
 				ctx.slots.inject('main', () => ctx.slots.register({
 					name: 'main',
 					key: ENTRY_ID,
-				}, MainPanel));
+				}, (props) => h(PanelErrorBoundary, null, h(MainPanel, props))));
 			},
 		};
 	},
