@@ -33,6 +33,13 @@ window.__ModuleLoader__.load({
 			projectLabel: '项目',
 			analyzeBtn: '分析',
 			loadLatest: '读取最新分析',
+			history: '历史',
+			refresh: '重新分析',
+			clearHistory: '清空历史',
+			historyEmpty: '还没有历史记录，分析成功后会自动保存',
+			fromCache: '本地缓存',
+			fromSession: '会话分析',
+			fromLocal: '本地代码分析',
 			latestHint: '切走页面后请求会中断，可从这里取回会话里最近一次分析结果',
 			noLatest: '会话里还没有分析结果',
 			textOnly: '会话里最新一条是自然语言回复，不是结构化结果，已原样展示',
@@ -121,6 +128,13 @@ window.__ModuleLoader__.load({
 			projectLabel: 'Project',
 			analyzeBtn: 'Analyze',
 			loadLatest: 'Load latest',
+			history: 'History',
+			refresh: 'Re-analyze',
+			clearHistory: 'Clear',
+			historyEmpty: 'No history yet — successful analyses are saved automatically',
+			fromCache: 'Local cache',
+			fromSession: 'From session',
+			fromLocal: 'Local code scan',
 			latestHint: 'Leaving the page drops the running request — fetch the latest result from the session here',
 			noLatest: 'No analysis result in the session yet',
 			textOnly: 'The latest reply is plain text, not a structured result — shown as-is',
@@ -1409,6 +1423,8 @@ window.__ModuleLoader__.load({
 			const [error, setError] = useState('');
 			const [data, setData] = useState(memory.analyze.data);
 			const [interrupted, setInterrupted] = useState(false);
+			const [history, setHistory] = useState([]);
+			const [showHistory, setShowHistory] = useState(false);
 
 			useEffect(() => {
 				memory.analyze = { project, uri, data, loading };
@@ -1442,13 +1458,13 @@ window.__ModuleLoader__.load({
 				// eslint-disable-next-line react-hooks/exhaustive-deps
 			}, [pending]);
 
-			const run = useCallback(async () => {
+			const run = useCallback(async (force = false) => {
 				const value = uri.trim();
 				if (value === '') return;
 				setLoading(true);
 				setError('');
 				try {
-					setData(await callRpc('analyze', { project, uri: value }, 300000));
+					setData(await callRpc('analyze', { project, uri: value, force }, 300000));
 				} catch (e) {
 					setError(String(e?.message ?? e));
 					setData(null);
@@ -1457,12 +1473,49 @@ window.__ModuleLoader__.load({
 				}
 			}, [project, uri]);
 
+			const loadHistory = useCallback(async () => {
+				try {
+					const value = await callRpc('analyze-history', {}, 15000);
+					setHistory(Array.isArray(value?.items) ? value.items : []);
+					setShowHistory((previous) => !previous);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				}
+			}, []);
+
+			const pickHistory = useCallback((item) => {
+				setProject(item.project);
+				setUri(item.uri);
+				setShowHistory(false);
+				setLoading(true);
+				setError('');
+				(async () => {
+					try {
+						setData(await callRpc('analyze', { project: item.project, uri: item.uri }, 300000));
+					} catch (e) {
+						setError(String(e?.message ?? e));
+					} finally {
+						setLoading(false);
+					}
+				})();
+			}, []);
+
+			const clearHistory = useCallback(async () => {
+				try {
+					await callRpc('analyze-clear', {}, 10000);
+					setHistory([]);
+					setShowHistory(false);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				}
+			}, []);
+
 			const loadLatest = useCallback(async () => {
 				setError('');
 				setInterrupted(false);
 				setLoading(true);
 				try {
-					const value = await callRpc('analyze-latest', {}, 30000);
+					const value = await callRpc('analyze-latest', { project, uri: uri.trim() }, 30000);
 					const hasSteps = Array.isArray(value?.steps) && value.steps.length > 0;
 					const hasText = typeof value?.text === 'string' && value.text.trim() !== '';
 					if (hasSteps || hasText) {
@@ -1475,13 +1528,30 @@ window.__ModuleLoader__.load({
 				} finally {
 					setLoading(false);
 				}
-			}, []);
+			}, [project, uri]);
 
 			const header = data === null ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
 				h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, data.title || '—'),
 				h('div', { style: { fontSize: 12, color: COLORS.label2, lineHeight: 1.7 } }, data.summary || ''),
-				h('div', { style: { ...S.mono, fontSize: 11, color: COLORS.label2, marginTop: 6 } },
-					`${data.project ?? ''} · ${data.source?.file ?? ''}:${data.source?.line ?? ''}`));
+				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+					h('span', {
+						style: {
+							...S.mono,
+							fontSize: 10,
+							padding: '1px 6px',
+							borderRadius: 3,
+							color: COLORS.brand,
+							border: `1px solid ${COLORS.brand}`,
+						},
+					}, data.source?.mode === 'cache'
+						? translate('fromCache')
+						: (data.source?.mode === 'session' || data.source?.mode === 'session-latest'
+							? translate('fromSession')
+							: translate('fromLocal'))),
+					h('span', { style: { ...S.mono, fontSize: 11, color: COLORS.label2 } },
+						data.source?.mode === 'cache'
+							? `${data.project ?? ''} · ${String(data.source?.updatedAt ?? '').slice(0, 16).replace('T', ' ')} · ${data.source?.hits ?? 0} 次`
+							: `${data.project ?? ''} · ${data.source?.file ?? ''}${data.source?.line ? `:${data.source.line}` : ''}`)));
 
 			const endpoints = data === null || !Array.isArray(data.endpoints) ? [] : data.endpoints;
 			const steps = data === null || !Array.isArray(data.steps) ? [] : data.steps;
@@ -1529,11 +1599,36 @@ window.__ModuleLoader__.load({
 							onChange: (e) => setUri(e.target.value),
 							onKeyDown: (e) => { if (e.key === 'Enter') run(); },
 						})),
-					h('div', { style: { display: 'flex', gap: 8 } },
-						h('button', { style: S.button(true), onClick: run, disabled: loading, type: 'button' },
+					h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+						h('button', { style: S.button(true), onClick: () => run(false), disabled: loading, type: 'button' },
 							loading ? translate('analyzing') : translate('analyzeBtn')),
+						h('button', { style: S.button(false), onClick: () => run(true), disabled: loading, type: 'button' },
+							translate('refresh')),
 						h('button', { style: S.button(false), onClick: loadLatest, disabled: loading, type: 'button' },
-							translate('loadLatest')))),
+							translate('loadLatest')),
+						h('button', { style: S.button(false), onClick: loadHistory, disabled: loading, type: 'button' },
+							translate('history')))),
+				showHistory
+					? h('div', { style: { ...S.card, marginBottom: 12 } },
+						h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
+							h('span', { style: { fontSize: 12, fontWeight: 600 } }, translate('history')),
+							h('button', { style: S.button(false), onClick: clearHistory, type: 'button' }, translate('clearHistory'))),
+						history.length === 0
+							? h('div', { style: { fontSize: 12, color: COLORS.label2 } }, translate('historyEmpty'))
+							: history.map((item, index) => h('div', {
+								key: `hist${index}`,
+								style: {
+									padding: '7px 8px',
+									borderRadius: 5,
+									cursor: 'pointer',
+									background: index % 2 === 0 ? COLORS.layer2 : 'transparent',
+								},
+								onClick: () => pickHistory(item),
+							},
+								h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 2 } }, item.title || item.uri),
+								h('div', { style: { ...S.mono, fontSize: 10.5, color: COLORS.label2 } },
+									`${item.project} · ${item.uri} · ${item.stepCount} 步 · 用过 ${item.hits} 次 · ${String(item.updatedAt || '').slice(0, 16).replace('T', ' ')}`))))
+					: null,
 				h(ErrorBox, { message: error }),
 				interrupted && !loading
 					? h('div', { style: { ...S.card, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },

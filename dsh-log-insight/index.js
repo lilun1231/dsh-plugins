@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { clearAnalysisCache, findCachedAnalysis, readAnalysisCache, saveAnalysis, touchCachedAnalysis } from './lib/analysis-cache.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -630,13 +631,39 @@ export function apply(ctx, config) {
     if (typeof repoPath !== 'string' || repoPath === '') {
       return { ok: false, reason: `未配置项目路径：${project}` };
     }
+    // 本地已固化的分析直接复用，不必每次都去问会话；force=true 时强制重新分析
+    if (payload?.force !== true) {
+      try {
+        const cached = findCachedAnalysis(project, uri);
+        if (cached !== null && Array.isArray(cached.steps) && cached.steps.length > 0) {
+          const updated = touchCachedAnalysis(project, uri);
+          return {
+            ok: true,
+            project,
+            uri,
+            title: cached.title,
+            summary: cached.summary,
+            steps: cached.steps,
+            endpoints: Array.isArray(cached.endpoints) ? cached.endpoints : [],
+            source: {
+              mode: 'cache',
+              updatedAt: cached.updatedAt,
+              hits: Number(updated?.hits ?? (Number(cached.hits ?? 0) + 1)),
+            },
+          };
+        }
+      } catch {
+        // 缓存损坏就当没有，继续正常分析
+      }
+    }
+
     // 优先委派给固定会话：它有完整工具，能逐层读代码，也便于排查思维链
     if (analyzeSessionId !== '' && payload?.via !== 'local') {
       try {
         const reply = await askSession(analyzeSessionId, buildSessionTask(project, repoPath, uri));
         const parsed = parseSessionReply(reply);
         if (parsed.steps.length > 0) {
-          return {
+          const result = {
             ok: true,
             project,
             uri,
@@ -646,6 +673,8 @@ export function apply(ctx, config) {
             endpoints: parsed.endpoints,
             source: { mode: 'session', sessionId: analyzeSessionId },
           };
+          saveAnalysis({ project, uri, title: result.title, summary: result.summary, steps: result.steps, endpoints: result.endpoints });
+          return result;
         }
       } catch {
         // 会话不可用或超时，退回本地分析，面板不因会话问题而不可用
@@ -659,7 +688,7 @@ export function apply(ctx, config) {
       }
       const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 40000)].join('\n');
       const analysis = parseAnalysis(await callModel(ANALYZE_PROMPT, prompt));
-      return {
+      const localResult = {
         ok: true,
         project,
         uri,
@@ -669,6 +698,8 @@ export function apply(ctx, config) {
         endpoints: analysis.endpoints,
         source: { mode: 'local', file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
       };
+      saveAnalysis({ project, uri, title: localResult.title, summary: localResult.summary, steps: localResult.steps, endpoints: localResult.endpoints });
+      return localResult;
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }
@@ -678,9 +709,9 @@ export function apply(ctx, config) {
    * 读取分析会话里最近一次的接口分析结果。
    * @returns {Promise<object>} 分析结果
    */
-  async function runAnalyzeLatest() {
+  async function runAnalyzeLatest(payload) {
     try {
-      return await readSessionLatest();
+      return await readSessionLatest(payload);
     } catch (error) {
       return { ok: false, reason: `读取会话失败：${String(error?.message ?? error)}` };
     }
@@ -690,7 +721,7 @@ export function apply(ctx, config) {
    * 真正读取会话最近一条分析结果。
    * @returns {Promise<object>} 分析结果
    */
-  async function readSessionLatest() {
+  async function readSessionLatest(payload) {
     if (analyzeSessionId === '') return { ok: false, reason: '未配置分析会话' };
     let agents;
     try {
@@ -730,7 +761,7 @@ export function apply(ctx, config) {
       try {
         const parsed = parseSessionReply(buffer);
         if (parsed.steps.length > 0) {
-          return {
+          const latest = {
             ok: true,
             title: parsed.title,
             summary: parsed.summary,
@@ -738,6 +769,13 @@ export function apply(ctx, config) {
             endpoints: parsed.endpoints,
             source: { mode: 'session-latest', sessionId: analyzeSessionId },
           };
+          // 只有调用方明确告诉是哪个接口时才落库，避免写入无法复用的脏数据
+          const project = String(payload?.project ?? '');
+          const uri = String(payload?.uri ?? '').trim();
+          if (project !== '' && uri !== '') {
+            saveAnalysis({ project, uri, title: latest.title, summary: latest.summary, steps: latest.steps, endpoints: latest.endpoints });
+          }
+          return latest;
         }
       } catch {
         // 还没拼出完整 JSON，继续往前累积
@@ -766,6 +804,31 @@ export function apply(ctx, config) {
         '请点「分析」等它跑完再读取，或确认会话里最新回复带 steps 的 JSON。',
       ].filter((line) => line !== '').join(' '),
     };
+  }
+
+  /**
+   * 列出本地固化的接口分析历史。
+   * @returns {Promise<object>} 历史列表
+   */
+  async function runAnalyzeHistory() {
+    const items = readAnalysisCache().map((item) => ({
+      project: String(item.project ?? ''),
+      uri: String(item.uri ?? ''),
+      title: String(item.title ?? ''),
+      stepCount: Array.isArray(item.steps) ? item.steps.length : 0,
+      updatedAt: String(item.updatedAt ?? ''),
+      hits: Number(item.hits ?? 0),
+    }));
+    return { ok: true, items };
+  }
+
+  /**
+   * 清空本地分析历史。
+   * @returns {Promise<object>} 结果
+   */
+  async function runAnalyzeClear() {
+    const cleared = clearAnalysisCache();
+    return cleared ? { ok: true } : { ok: false, reason: '清空失败，请检查缓存文件权限' };
   }
 
   //#endregion
@@ -1173,6 +1236,8 @@ export function apply(ctx, config) {
     ask: runAsk,
     analyze: runAnalyze,
     'analyze-latest': runAnalyzeLatest,
+    'analyze-history': runAnalyzeHistory,
+    'analyze-clear': runAnalyzeClear,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',
