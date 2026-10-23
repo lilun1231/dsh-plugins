@@ -51,6 +51,7 @@ window.__ModuleLoader__.load({
 			tabAsk: '问一问',
 			askPlaceholder: '用自然语言提问，例如：最近半小时 hall-restful 有没有报错',
 			askButton: '提问',
+			askHint: 'Enter 发送，Shift+Enter 换行',
 			asking: '分析中…（需要调用模型，约 10-20 秒）',
 			answerLabel: '分析结论',
 			planLabel: '解析为',
@@ -146,6 +147,7 @@ window.__ModuleLoader__.load({
 			tabAsk: 'Ask',
 			askPlaceholder: 'Ask in natural language, e.g. any errors in hall-restful',
 			askButton: 'Ask',
+			askHint: 'Enter to send, Shift+Enter for a new line',
 			asking: 'Analyzing… (model call, ~10-20s)',
 			answerLabel: 'Analysis',
 			planLabel: 'Parsed as',
@@ -1558,16 +1560,33 @@ window.__ModuleLoader__.load({
 					}))));
 
 			return h('div', null,
-				h('div', { style: S.form },
-					h('input', {
-						style: S.input,
+				h('div', { style: { marginBottom: 12 } },
+					h('textarea', {
+						style: {
+							...S.input,
+							width: '100%',
+							minHeight: 88,
+							resize: 'vertical',
+							lineHeight: 1.7,
+							boxSizing: 'border-box',
+							fontFamily: 'inherit',
+						},
+						rows: 3,
 						value: question,
 						placeholder: translate('askPlaceholder'),
 						onChange: (e) => setQuestion(e.target.value),
-						onKeyDown: (e) => { if (e.key === 'Enter') ask(); },
+						// Enter 发送、Shift+Enter 换行，符合聊天习惯
+						onKeyDown: (e) => {
+							if (e.key === 'Enter' && !e.shiftKey) {
+								e.preventDefault();
+								ask();
+							}
+						},
 					}),
-					h('button', { style: S.button(true), onClick: ask, disabled: loading, type: 'button' },
-						loading ? translate('asking') : translate('askButton'))),
+					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 } },
+						h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('askHint')),
+						h('button', { style: S.button(true), onClick: ask, disabled: loading, type: 'button' },
+							loading ? translate('asking') : translate('askButton')))),
 				h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' } },
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('askExamples')),
 					examples.map((ex, idx) => h('button', {
