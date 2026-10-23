@@ -408,16 +408,36 @@ export function apply(ctx, config) {
    * @returns {object} 解析结果
    */
   function parseSessionReply(text) {
-    const fenced = String(text).match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const raw = fenced !== null ? fenced[1] : String(text);
-    const matched = raw.match(/\{[\s\S]*\}/);
-    if (matched === null) throw new Error('会话没有返回可解析的结果');
-    let value;
-    try {
-      value = JSON.parse(matched[0]);
-    } catch {
-      throw new Error('会话返回的结果不是合法 JSON');
+    const source = String(text);
+    const candidates = [];
+    for (const match of source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) candidates.push(match[1]);
+    candidates.push(source);
+
+    // 依次尝试每个代码块；块内从后往前找 JSON 起点，兼容回复里混有多段 JSON
+    let value = null;
+    for (const raw of candidates) {
+      const starts = [];
+      for (let index = 0; index < raw.length; index += 1) {
+        if (raw[index] === '{') starts.push(index);
+      }
+      for (let start = starts.length - 1; start >= 0 && value === null; start -= 1) {
+        const tail = raw.slice(starts[start]);
+        for (let end = tail.length; end > 1; end -= 1) {
+          if (tail[end - 1] !== '}') continue;
+          try {
+            const parsed = JSON.parse(tail.slice(0, end));
+            if (Array.isArray(parsed?.steps)) {
+              value = parsed;
+              break;
+            }
+          } catch {
+            // 这个结尾不是合法 JSON，继续缩小
+          }
+        }
+      }
+      if (value !== null) break;
     }
+    if (value === null) throw new Error('会话没有返回可解析的结果');
     const endpoints = Array.isArray(value.endpoints)
       ? value.endpoints
         .map((item) => ({ label: cleanText(item?.label), uri: cleanText(item?.uri), kind: cleanText(item?.kind) || 'http' }))
@@ -704,7 +724,7 @@ export function apply(ctx, config) {
         .map((block) => block.text)
         .join('');
       if (text.trim() === '') continue;
-      if (preview === '') preview = text.trim().slice(0, 60);
+      if (preview === '') preview = text.trim().replace(/\s+/g, ' ').slice(0, 200);
       buffer = `${text}\n${buffer}`;
       attempts += 1;
       try {

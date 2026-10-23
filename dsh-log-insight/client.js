@@ -1463,7 +1463,9 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				try {
 					const value = await callRpc('analyze-latest', {}, 30000);
-					if (Array.isArray(value?.steps) && value.steps.length > 0) {
+					const hasSteps = Array.isArray(value?.steps) && value.steps.length > 0;
+					const hasText = typeof value?.text === 'string' && value.text.trim() !== '';
+					if (hasSteps || hasText) {
 						setData(value);
 					} else {
 						setError(translate('noLatest'));
