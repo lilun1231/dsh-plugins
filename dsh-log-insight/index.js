@@ -277,54 +277,145 @@ export function apply(ctx, config) {
     return JSON.stringify(result).slice(0, 3000);
   }
 
+  /** 字段名到中文标签，用于图表标题。 */
+  const CHART_FIELD_LABELS = {
+    level: '级别', service: '服务', status: '状态', method: '方法', uri: '接口',
+    count: '数量', total: '总数', type: '类型', error: '错误', env: '环境',
+    durationMs: '耗时', costMs: '耗时', elapsed: '耗时', timestamp: '时间', callTime: '时间',
+  };
+
   /**
-   * 把查询结果聚合成图表数据，供面板画柱状图。
-   * @param {object} plan 执行计划
-   * @param {object} result 查询结果
-   * @returns {{title: string, unit: string, items: Array<{label: string, value: number}>} | null} 图表数据
+   * 分析一组记录的字段类型，判断哪些能画图。
+   * @param {Array<object>} rows 记录
+   * @returns {{categorical: Array<object>, numeric: string[], time: string[]}} 字段分类
    */
-  function buildChart(plan, result) {
-    if (result === null || typeof result !== 'object' || result.ok === false) return null;
-    const pack = (entries, title, unit, limit = 8) => {
-      const items = entries
-        .filter((entry) => typeof entry[1] === 'number' && entry[1] > 0)
-        .sort((left, right) => right[1] - left[1])
-        .slice(0, limit)
-        .map(([label, value]) => ({ label: String(label).slice(0, 26), value }));
-      return items.length === 0 ? null : { title, unit, items };
-    };
-    const countBy = (rows, keyOf) => {
-      const counts = new Map();
-      for (const row of rows) {
-        const key = keyOf(row);
-        counts.set(key, (counts.get(key) ?? 0) + 1);
+  function analyzeRowFields(rows) {
+    const keys = new Set();
+    for (const row of rows) {
+      if (row === null || typeof row !== 'object') continue;
+      for (const key of Object.keys(row)) keys.add(key);
+    }
+    const categorical = [];
+    const numeric = [];
+    const time = [];
+    const need = Math.max(2, Math.ceil(rows.length * 0.3));
+
+    for (const key of keys) {
+      const values = rows
+        .map((row) => (row === null || typeof row !== 'object' ? undefined : row[key]))
+        .filter((value) => value !== undefined && value !== null && value !== '');
+      if (values.length < need) continue;
+
+      const sample = values[0];
+      if (typeof sample === 'number' && Number.isFinite(sample)) {
+        numeric.push(key);
+        continue;
       }
-      return [...counts.entries()];
+      if (typeof sample !== 'string') continue;
+      if (/time|timestamp|date/i.test(key)) {
+        time.push(key);
+        continue;
+      }
+      // 低基数（2~12 种）且确实有重复的字符串字段，才适合做分类统计
+      const unique = new Set(values.map((value) => String(value)));
+      if (unique.size >= 2 && unique.size <= 12 && unique.size < values.length) {
+        categorical.push({ key, unique: unique.size });
+      }
+    }
+    return { categorical, numeric, time };
+  }
+
+  /**
+   * 从查询结果里自动识别可画图的数据，并给出对应图表。
+   *
+   * 不依赖具体查询动作，只看数据结构：
+   *   - 低基数分类字段（级别/服务/状态）→ 分类分布柱状图
+   *   - 数值字段（耗时/数量）→ 排行榜柱状图
+   *   - 时间字段 + 数值字段 → 按分钟聚合的趋势折线图
+   *
+   * @param {object} result 查询结果
+   * @returns {Array<object>} 图表列表，最多 3 张
+   */
+  function buildCharts(result) {
+    if (result === null || typeof result !== 'object' || result.ok === false) return [];
+
+    // 找出结果里的记录数组
+    const collections = [];
+    for (const [key, value] of Object.entries(result)) {
+      if (!Array.isArray(value) || value.length < 2) continue;
+      const rows = value.filter((row) => row !== null && typeof row === 'object');
+      if (rows.length >= 2) collections.push({ key, rows });
+    }
+
+    const charts = [];
+    const labelOf = (key) => CHART_FIELD_LABELS[key] ?? key;
+    const pickName = (row) => {
+      for (const field of ['service', 'uri', 'name', 'label', 'serialNo']) {
+        const value = row?.[field];
+        if (typeof value === 'string' && value !== '') return value.slice(0, 26);
+      }
+      return '—';
     };
 
-    if (plan?.action === 'log_search') {
-      return pack(countBy(Array.isArray(result.hits) ? result.hits : [], (hit) => String(hit?.level ?? 'UNKNOWN').toUpperCase()), '按级别分布', '条');
+    for (const { rows } of collections) {
+      const fields = analyzeRowFields(rows);
+
+      // 1) 分类分布：最容易看懂的，优先出
+      for (const field of fields.categorical.slice(0, 2)) {
+        const counts = new Map();
+        for (const row of rows) {
+          const value = String(row?.[field.key] ?? '').trim();
+          if (value === '') continue;
+          counts.set(value, (counts.get(value) ?? 0) + 1);
+        }
+        const items = [...counts.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, 8)
+          .map(([label, value]) => ({ label, value }));
+        if (items.length >= 2) {
+          charts.push({ kind: 'bar', title: `按${labelOf(field.key)}分布`, unit: '条', items });
+        }
+      }
+
+      // 2) 数值排行：谁是最大的
+      for (const numKey of fields.numeric.slice(0, 1)) {
+        const items = rows
+          .filter((row) => typeof row?.[numKey] === 'number' && Number.isFinite(row[numKey]))
+          .sort((left, right) => right[numKey] - left[numKey])
+          .slice(0, 8)
+          .map((row) => ({ label: pickName(row), value: Math.round(row[numKey]) }));
+        if (items.length >= 2) {
+          const isMs = /duration|cost|elapsed|ms/i.test(numKey);
+          charts.push({ kind: 'bar', title: `${labelOf(numKey)}排行`, unit: isMs ? 'ms' : '', items });
+        }
+      }
+
+      // 3) 时间趋势：按分钟分桶
+      if (fields.time.length > 0) {
+        const buckets = new Map();
+        for (const row of rows) {
+          const raw = row?.[fields.time[0]];
+          const at = Date.parse(String(raw ?? ''));
+          if (Number.isNaN(at)) continue;
+          const minute = Math.floor(at / 60000) * 60000;
+          buckets.set(minute, (buckets.get(minute) ?? 0) + 1);
+        }
+        if (buckets.size >= 3) {
+          const items = [...buckets.entries()]
+            .sort((left, right) => left[0] - right[0])
+            .slice(-24)
+            .map(([minute, value]) => {
+              const date = new Date(minute);
+              const hh = String(date.getHours()).padStart(2, '0');
+              const mm = String(date.getMinutes()).padStart(2, '0');
+              return { label: `${hh}:${mm}`, value };
+            });
+          charts.push({ kind: 'line', title: '按分钟趋势', unit: '条', items });
+        }
+      }
     }
-    if (plan?.action === 'trace_search') {
-      return pack(countBy(Array.isArray(result.items) ? result.items : [], (item) => String(item?.service ?? '未知')), '按服务分布', '条');
-    }
-    if (plan?.action === 'trace_detail') {
-      const spans = (Array.isArray(result.spans) ? result.spans : []).filter((span) => typeof span?.durationMs === 'number');
-      if (spans.length === 0) return null;
-      const slowest = [...spans].sort((left, right) => right.durationMs - left.durationMs).slice(0, 8);
-      return {
-        title: '最慢的段落',
-        unit: 'ms',
-        items: slowest.map((span) => ({
-          label: `${span.service ?? ''} ${span.uri ?? ''}`.trim().slice(0, 26) || '—',
-          value: Math.round(span.durationMs),
-        })),
-      };
-    }
-    if (plan?.action === 'service_status' && Array.isArray(result.items)) {
-      return pack(result.items.map((item) => [String(item?.name ?? '未知'), Number(item?.count ?? 0)]), '各服务调用量', '次');
-    }
-    return null;
+
+    return charts.slice(0, 3);
   }
 
   /**
@@ -339,7 +430,7 @@ export function apply(ctx, config) {
       const plan = parsePlan(await callModel(PLANNER_PROMPT, question));
       const result = await executePlan(plan, payload?.env);
       const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
-      return { ok: true, question, plan, answer, result, chart: buildChart(plan, result) };
+      return { ok: true, question, plan, answer, result, charts: buildCharts(result) };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }

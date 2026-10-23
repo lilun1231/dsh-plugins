@@ -1090,57 +1090,104 @@ window.__ModuleLoader__.load({
 		}
 
 
+		/** 图表配色。 */
+		const CHART_COLORS = ['#2563eb', '#7c3aed', '#059669', '#ca8a04', '#dc2626', '#0891b2', '#64748b', '#db2777'];
+
 		/**
-		 * 横向柱状图。纯 div 实现，不引入任何图表依赖。
+		 * 横向柱状图：适合分类分布和数值排行。
+		 * @param {object} props 组件属性
+		 * @returns {object} 图表节点
+		 */
+		function BarRows({ items }) {
+			const max = Math.max(...items.map((item) => Number(item.value) || 0), 1);
+			return h('div', null, items.map((item, index) => h('div', {
+				key: `bar${index}`,
+				style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 },
+			},
+				h('span', {
+					style: {
+						...S.mono,
+						fontSize: 10.5,
+						width: 140,
+						flexShrink: 0,
+						overflow: 'hidden',
+						textOverflow: 'ellipsis',
+						whiteSpace: 'nowrap',
+						color: COLORS.label2,
+					},
+					title: String(item.label ?? ''),
+				}, String(item.label ?? '—')),
+				h('div', {
+					style: {
+						flex: 1,
+						height: 12,
+						background: COLORS.layer2,
+						borderRadius: 3,
+						overflow: 'hidden',
+						minWidth: 40,
+					},
+				},
+					h('div', {
+						style: {
+							width: `${Math.max(2, Math.round((Number(item.value) / max) * 100))}%`,
+							height: '100%',
+							background: CHART_COLORS[index % CHART_COLORS.length],
+							borderRadius: 3,
+						},
+					})),
+				h('span', {
+					style: { ...S.mono, fontSize: 10.5, width: 56, textAlign: 'right', flexShrink: 0 },
+				}, String(item.value)))));
+		}
+
+		/**
+		 * 折线图：适合时间趋势。纯 SVG，不引入图表库。
+		 * @param {object} props 组件属性
+		 * @returns {object} 图表节点
+		 */
+		function LineChart({ items }) {
+			const width = 600;
+			const height = 96;
+			const pad = 8;
+			const max = Math.max(...items.map((item) => Number(item.value) || 0), 1);
+			const step = items.length > 1 ? (width - pad * 2) / (items.length - 1) : 0;
+			const points = items.map((item, index) => {
+				const x = pad + index * step;
+				const y = height - pad - ((Number(item.value) || 0) / max) * (height - pad * 2);
+				return `${x.toFixed(1)},${y.toFixed(1)}`;
+			});
+			return h('div', null,
+				h('svg', {
+					viewBox: `0 0 ${width} ${height}`,
+					style: { width: '100%', height, display: 'block', overflow: 'visible' },
+				},
+				h('polyline', {
+					points: points.join(' '),
+					fill: 'none',
+					stroke: CHART_COLORS[0],
+					strokeWidth: 2,
+					strokeLinejoin: 'round',
+					strokeLinecap: 'round',
+				})),
+				h('div', { style: { ...S.mono, fontSize: 10, color: COLORS.label2, display: 'flex', justifyContent: 'space-between' } },
+					h('span', null, String(items[0]?.label ?? '')),
+					h('span', null, String(items[items.length - 1]?.label ?? ''))));
+		}
+
+		/**
+		 * 单张图表卡片，按 kind 选择渲染方式。
 		 * @param {object} props 组件属性
 		 * @returns {object|null} 图表节点
 		 */
-		function MiniBarChart({ chart }) {
+		function ChartCard({ chart }) {
 			if (chart === null || typeof chart !== 'object') return null;
-			const items = Array.isArray(chart.items) ? chart.items.filter((item) => Number.isFinite(Number(item?.value))) : [];
-			if (items.length === 0) return null;
-			const max = Math.max(...items.map((item) => Number(item.value)), 1);
-			const palette = ['#2563eb', '#7c3aed', '#059669', '#ca8a04', '#dc2626', '#0891b2', '#64748b', '#db2777'];
+			const items = Array.isArray(chart.items)
+				? chart.items.filter((item) => item !== null && typeof item === 'object' && Number.isFinite(Number(item.value)))
+				: [];
+			if (items.length < 2) return null;
 			return h('div', { style: { ...S.card, marginBottom: 12 } },
 				h('div', { style: S.cardLabel }, `${chart.title ?? '统计'}${chart.unit ? `（${chart.unit}）` : ''}`),
-				items.map((item, index) => h('div', {
-					key: `bar${index}`,
-					style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 },
-				},
-					h('span', {
-						style: {
-							...S.mono,
-							fontSize: 10.5,
-							width: 140,
-							flexShrink: 0,
-							overflow: 'hidden',
-							textOverflow: 'ellipsis',
-							whiteSpace: 'nowrap',
-							color: COLORS.label2,
-						},
-						title: String(item.label ?? ''),
-					}, String(item.label ?? '—')),
-					h('div', {
-						style: {
-							flex: 1,
-							height: 12,
-							background: COLORS.layer2,
-							borderRadius: 3,
-							overflow: 'hidden',
-							minWidth: 40,
-						},
-					},
-						h('div', {
-							style: {
-								width: `${Math.max(2, Math.round((Number(item.value) / max) * 100))}%`,
-								height: '100%',
-								background: palette[index % palette.length],
-								borderRadius: 3,
-							},
-						})),
-					h('span', {
-						style: { ...S.mono, fontSize: 10.5, width: 56, textAlign: 'right', flexShrink: 0 },
-					}, String(item.value)))));
+				chart.kind === 'line' ? h(LineChart, { items }) : h(BarRows, { items }));
 		}
 
 		/**
@@ -1455,11 +1502,11 @@ window.__ModuleLoader__.load({
 			const [answer, setAnswer] = useState(memory.ask.answer);
 			const [plan, setPlan] = useState(memory.ask.plan);
 			const [result, setResult] = useState(memory.ask.result);
-			const [chart, setChart] = useState(memory.ask.chart ?? null);
+			const [charts, setCharts] = useState(memory.ask.charts ?? []);
 
 			useEffect(() => {
-				memory.ask = { question, answer, plan, result, chart };
-			}, [question, answer, plan, result, chart]);
+				memory.ask = { question, answer, plan, result, charts };
+			}, [question, answer, plan, result, charts]);
 
 			const ask = useCallback(async () => {
 				const text = question.trim();
@@ -1475,7 +1522,7 @@ window.__ModuleLoader__.load({
 					setAnswer(typeof res?.answer === 'string' ? res.answer : '');
 					setPlan(res?.plan ?? null);
 					setResult(res?.result ?? null);
-					setChart(res?.chart ?? null);
+					setCharts(Array.isArray(res?.charts) ? res.charts : []);
 				} catch (e) {
 					setError(String(e?.message ?? e));
 				} finally {
@@ -1489,7 +1536,7 @@ window.__ModuleLoader__.load({
 				'hall-restful 最近一小时的健康指标怎么样',
 			];
 
-			const chartCard = h(MiniBarChart, { chart });
+			const chartCards = charts.map((chart, index) => h(ChartCard, { key: `ch${index}`, chart }));
 			const answerCard = answer === '' ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
 				h('div', { style: S.cardLabel }, translate('answerLabel')),
 				h('div', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.7, fontSize: 13 } }, answer));
@@ -1531,7 +1578,7 @@ window.__ModuleLoader__.load({
 					}, ex))),
 				h(ErrorBox, { message: error }),
 				loading ? h('div', { style: S.empty }, translate('asking')) : null,
-				chartCard,
+				...chartCards,
 				answerCard,
 				planLine,
 				resultView);
