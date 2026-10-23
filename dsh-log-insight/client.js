@@ -52,6 +52,15 @@ window.__ModuleLoader__.load({
 			askPlaceholder: '用自然语言提问，例如：最近半小时 hall-restful 有没有报错',
 			askButton: '提问',
 			askHint: 'Enter 发送，Shift+Enter 换行',
+			askStagePlan: '理解问题',
+			askStageQuery: '查询',
+			askStageExplain: '生成解读',
+			askRunning: '执行中',
+			askDone: '执行过程',
+			askNoPlan: '没听懂这个问题，换个说法或补充时间范围试试',
+			askHistory: '历史提问',
+			askHistoryEmpty: '还没有提问记录，问过的问题会自动保存',
+			askClear: '清空',
 			asking: '分析中…（需要调用模型，约 10-20 秒）',
 			answerLabel: '分析结论',
 			planLabel: '解析为',
@@ -148,6 +157,15 @@ window.__ModuleLoader__.load({
 			askPlaceholder: 'Ask in natural language, e.g. any errors in hall-restful',
 			askButton: 'Ask',
 			askHint: 'Enter to send, Shift+Enter for a new line',
+			askStagePlan: 'Understanding',
+			askStageQuery: 'Querying',
+			askStageExplain: 'Summarizing',
+			askRunning: 'Running',
+			askDone: 'Steps',
+			askNoPlan: 'Could not understand the question — try rephrasing or adding a time range',
+			askHistory: 'History',
+			askHistoryEmpty: 'No questions yet — asked questions are saved automatically',
+			askClear: 'Clear',
 			asking: 'Analyzing… (model call, ~10-20s)',
 			answerLabel: 'Analysis',
 			planLabel: 'Parsed as',
@@ -1096,6 +1114,32 @@ window.__ModuleLoader__.load({
 		const CHART_COLORS = ['#2563eb', '#7c3aed', '#059669', '#ca8a04', '#dc2626', '#0891b2', '#64748b', '#db2777'];
 
 		/**
+		 * 问答执行进度：把每个阶段跑成一条时间线，卡在哪一步一眼可见。
+		 * @param {object} props 组件属性
+		 * @returns {object|null} 进度节点
+		 */
+		function AskProgress({ steps, running }) {
+			if (!Array.isArray(steps) || steps.length === 0) return null;
+			const tone = { running: COLORS.brand, done: COLORS.success, warn: COLORS.warn, failed: COLORS.error };
+			const mark = { running: '●', done: '✓', warn: '!', failed: '✕' };
+			return h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: S.cardLabel }, running ? translate('askRunning') : translate('askDone')),
+				steps.map((step, index) => h('div', {
+					key: `st${index}`,
+					style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, fontSize: 12 },
+				},
+					h('span', { style: { color: tone[step.status] ?? COLORS.label2, width: 14, textAlign: 'center', flexShrink: 0 } },
+						mark[step.status] ?? '·'),
+					h('span', { style: { flex: 1, color: step.status === 'running' ? COLORS.label1 : COLORS.label2 } },
+						String(step.label ?? '')),
+					typeof step.ms === 'number'
+						? h('span', { style: { ...S.mono, fontSize: 10.5, color: COLORS.label2 } }, `${step.ms}ms`)
+						: null,
+					h('span', { style: { fontSize: 10.5, color: tone[step.status] ?? COLORS.label2 } },
+						String(step.note ?? '')))));
+		}
+
+		/**
 		 * 横向柱状图：适合分类分布和数值排行。
 		 * @param {object} props 组件属性
 		 * @returns {object} 图表节点
@@ -1505,11 +1549,15 @@ window.__ModuleLoader__.load({
 			const [plan, setPlan] = useState(memory.ask.plan);
 			const [result, setResult] = useState(memory.ask.result);
 			const [charts, setCharts] = useState(memory.ask.charts ?? []);
+			const [steps, setSteps] = useState(memory.ask.steps ?? []);
+			const [history, setHistory] = useState([]);
+			const [showHistory, setShowHistory] = useState(false);
 
 			useEffect(() => {
-				memory.ask = { question, answer, plan, result, charts };
-			}, [question, answer, plan, result, charts]);
+				memory.ask = { question, answer, plan, result, charts, steps };
+			}, [question, answer, plan, result, charts, steps]);
 
+			// 三阶段执行：每一步都更新进度，失败或慢都能看出卡在哪
 			const ask = useCallback(async () => {
 				const text = question.trim();
 				if (text === '') return;
@@ -1518,19 +1566,93 @@ window.__ModuleLoader__.load({
 				setAnswer('');
 				setPlan(null);
 				setResult(null);
-				setChart(null);
+				setCharts([]);
+				setSteps([]);
+
+				const timeline = [];
+				const begin = (label) => {
+					timeline.push({ label, status: 'running', startedAt: Date.now() });
+					setSteps(timeline.map((item) => ({ ...item })));
+					return timeline.length - 1;
+				};
+				const settle = (index, status, note) => {
+					const item = timeline[index];
+					if (item === undefined) return;
+					item.status = status;
+					item.ms = Date.now() - item.startedAt;
+					item.note = note ?? '';
+					setSteps(timeline.map((entry) => ({ ...entry })));
+				};
+
 				try {
-					const res = await callRpc('ask', { question: text }, 90000);
-					setAnswer(typeof res?.answer === 'string' ? res.answer : '');
-					setPlan(res?.plan ?? null);
-					setResult(res?.result ?? null);
-					setCharts(Array.isArray(res?.charts) ? res.charts : []);
+					const planIndex = begin(translate('askStagePlan'));
+					const planned = await callRpc('ask-step', { stage: 'plan', question: text }, 60000);
+					const nextPlan = planned?.plan ?? null;
+					settle(planIndex, 'done', String(nextPlan?.action ?? ''));
+					setPlan(nextPlan);
+
+					if (nextPlan === null) {
+						setError(translate('askNoPlan'));
+						return;
+					}
+
+					const execIndex = begin(`${translate('askStageQuery')} ${String(nextPlan.action ?? '')}`);
+					const executed = await callRpc('ask-step', { stage: 'exec', question: text, plan: nextPlan }, 120000);
+					// 查询本身失败不是异常，标黄并继续解读，让结论里说明原因
+					settle(execIndex, executed?.failed === true ? 'warn' : 'done',
+						executed?.failed === true ? String(executed?.reason ?? '') : `${executed?.total ?? 0} 条`);
+					setResult(executed?.result ?? null);
+
+					const explainIndex = begin(translate('askStageExplain'));
+					const explained = await callRpc('ask-step', {
+						stage: 'explain',
+						question: text,
+						plan: nextPlan,
+						result: executed?.result ?? null,
+					}, 120000);
+					settle(explainIndex, 'done', '');
+					setAnswer(typeof explained?.answer === 'string' ? explained.answer : '');
+					setCharts(Array.isArray(explained?.charts) ? explained.charts : []);
 				} catch (e) {
+					// 把还没收尾的那一步标成失败，直接指出卡点
+					for (const entry of timeline) {
+						if (entry.status === 'running') {
+							entry.status = 'failed';
+							entry.ms = Date.now() - entry.startedAt;
+						}
+					}
+					setSteps(timeline.map((entry) => ({ ...entry })));
 					setError(String(e?.message ?? e));
 				} finally {
 					setLoading(false);
 				}
 			}, [question]);
+
+			const loadHistory = useCallback(async () => {
+				try {
+					const value = await callRpc('ask-history', {}, 15000);
+					setHistory(Array.isArray(value?.items) ? value.items : []);
+					setShowHistory((previous) => !previous);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				}
+			}, []);
+
+			// 点历史回填问题并重新走一遍，结果都是当时的真实数据
+			const pickHistory = useCallback((item) => {
+				setShowHistory(false);
+				setQuestion(item.question);
+			}, []);
+
+			const clearHistory = useCallback(async () => {
+				try {
+					await callRpc('ask-clear', {}, 10000);
+					setHistory([]);
+					setShowHistory(false);
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				}
+			}, []);
 
 			const examples = [
 				'最近半小时 hall-restful 有没有报错',
@@ -1585,8 +1707,11 @@ window.__ModuleLoader__.load({
 					}),
 					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 } },
 						h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('askHint')),
-						h('button', { style: S.button(true), onClick: ask, disabled: loading, type: 'button' },
-							loading ? translate('asking') : translate('askButton')))),
+						h('div', { style: { display: 'flex', gap: 8 } },
+							h('button', { style: S.button(false), onClick: loadHistory, disabled: loading, type: 'button' },
+								translate('askHistory')),
+							h('button', { style: S.button(true), onClick: ask, disabled: loading, type: 'button' },
+								loading ? translate('asking') : translate('askButton'))))),
 				h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' } },
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('askExamples')),
 					examples.map((ex, idx) => h('button', {
@@ -1595,6 +1720,28 @@ window.__ModuleLoader__.load({
 						style: S.button(false),
 						onClick: () => setQuestion(ex),
 					}, ex))),
+				showHistory
+					? h('div', { style: { ...S.card, marginBottom: 12 } },
+						h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
+							h('span', { style: { fontSize: 12, fontWeight: 600 } }, translate('askHistory')),
+							h('button', { style: S.button(false), onClick: clearHistory, type: 'button' }, translate('askClear'))),
+						history.length === 0
+							? h('div', { style: { fontSize: 12, color: COLORS.label2 } }, translate('askHistoryEmpty'))
+							: history.map((item, index) => h('div', {
+								key: `ah${index}`,
+								style: {
+									padding: '7px 8px',
+									borderRadius: 5,
+									cursor: 'pointer',
+									background: index % 2 === 0 ? COLORS.layer2 : 'transparent',
+								},
+								onClick: () => pickHistory(item),
+							},
+								h('div', { style: { fontSize: 12, marginBottom: 2 } }, item.question),
+								h('div', { style: { ...S.mono, fontSize: 10.5, color: COLORS.label2 } },
+									`${item.action || '—'} · ${item.hitCount} 条 · ${String(item.createdAt || '').slice(0, 16).replace('T', ' ')}`))))
+					: null,
+				h(AskProgress, { steps, running: loading }),
 				h(ErrorBox, { message: error }),
 				loading ? h('div', { style: S.empty }, translate('asking')) : null,
 				...chartCards,

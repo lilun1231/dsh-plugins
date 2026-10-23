@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { clearAnalysisCache, findCachedAnalysis, readAnalysisCache, saveAnalysis, touchCachedAnalysis } from './lib/analysis-cache.js';
+import { clearAskHistory, readAskHistory, saveAsk } from './lib/ask-history.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -430,10 +431,118 @@ export function apply(ctx, config) {
       const plan = parsePlan(await callModel(PLANNER_PROMPT, question));
       const result = await executePlan(plan, payload?.env);
       const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
-      return { ok: true, question, plan, answer, result, charts: buildCharts(result) };
+      const charts = buildCharts(result);
+      saveAsk({ question, answer, plan, result, charts });
+      return { ok: true, question, plan, answer, result, charts };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }
+  }
+
+  /**
+   * 分阶段问答：面板逐步调用，每一步都能显示明确状态。
+   *
+   * stage=plan    把问题解析成执行计划
+   * stage=exec    按计划执行查询
+   * stage=explain 基于查询结果生成解读与图表
+   *
+   * 拆开的好处是每一步失败都能指出卡在哪，而不是让用户对着一个转圈等 90 秒。
+   *
+   * @param {object} payload 阶段、问题与上一步产物
+   * @returns {Promise<object>} 该阶段结果
+   */
+  async function runAskStep(payload) {
+    const stage = String(payload?.stage ?? '');
+    const question = String(payload?.question ?? '').trim();
+    if (question === '') return { ok: false, reason: '请输入问题' };
+
+    if (stage === 'plan') {
+      try {
+        const plan = parsePlan(await callModel(PLANNER_PROMPT, question));
+        return { ok: true, stage, plan };
+      } catch (error) {
+        return { ok: false, reason: `理解问题失败：${String(error?.message ?? error)}` };
+      }
+    }
+
+    if (stage === 'exec') {
+      const plan = payload?.plan;
+      if (plan === null || typeof plan !== 'object') return { ok: false, reason: '缺少执行计划，请先完成上一步' };
+      try {
+        const result = await executePlan(plan, payload?.env);
+        const failed = result !== null && typeof result === 'object' && result.ok === false;
+        return {
+          ok: true,
+          stage,
+          plan,
+          result,
+          total: result?.total ?? (Array.isArray(result?.hits) ? result.hits.length : 0),
+          failed,
+          reason: failed ? String(result.reason ?? '') : '',
+        };
+      } catch (error) {
+        return { ok: false, reason: `查询失败：${String(error?.message ?? error)}` };
+      }
+    }
+
+    if (stage === 'explain') {
+      const plan = payload?.plan;
+      const result = payload?.result;
+      if (plan === null || typeof plan !== 'object') return { ok: false, reason: '缺少执行计划，请先完成上一步' };
+      try {
+        const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
+        const charts = buildCharts(result);
+        saveAsk({ question, answer, plan, result, charts });
+        return { ok: true, stage, question, plan, answer, result, charts };
+      } catch (error) {
+        return { ok: false, reason: `生成解读失败：${String(error?.message ?? error)}` };
+      }
+    }
+
+    return { ok: false, reason: `未知阶段：${stage}` };
+  }
+
+  /**
+   * 列出问答历史，只返回列表需要的字段，不携带完整结果。
+   * @returns {Promise<object>} 历史列表
+   */
+  async function runAskHistory() {
+    const items = readAskHistory().map((item) => ({
+      question: String(item.question ?? ''),
+      answer: String(item.answer ?? ''),
+      action: String(item?.plan?.action ?? ''),
+      createdAt: String(item.createdAt ?? ''),
+      chartCount: Array.isArray(item.charts) ? item.charts.length : 0,
+      hitCount: Number(item?.result?.total ?? 0),
+    }));
+    return { ok: true, items };
+  }
+
+  /**
+   * 读取一条完整的历史记录（含结果与图表）。
+   * @param {object} payload 含 question
+   * @returns {Promise<object>} 历史条目
+   */
+  async function runAskLoad(payload) {
+    const question = String(payload?.question ?? '').trim();
+    const found = readAskHistory().find((item) => item.question === question);
+    if (found === undefined) return { ok: false, reason: '这条历史已经不在了，可能已被新记录挤出' };
+    return {
+      ok: true,
+      question: found.question,
+      answer: found.answer ?? '',
+      plan: found.plan ?? null,
+      result: found.result ?? null,
+      charts: Array.isArray(found.charts) ? found.charts : [],
+    };
+  }
+
+  /**
+   * 清空问答历史。
+   * @returns {Promise<object>} 结果
+   */
+  async function runAskClear() {
+    return clearAskHistory() ? { ok: true } : { ok: false, reason: '清空失败，请检查文件权限' };
   }
 
   //#endregion
@@ -1378,6 +1487,10 @@ export function apply(ctx, config) {
     'analyze-latest': runAnalyzeLatest,
     'analyze-history': runAnalyzeHistory,
     'analyze-clear': runAnalyzeClear,
+    'ask-step': runAskStep,
+    'ask-history': runAskHistory,
+    'ask-load': runAskLoad,
+    'ask-clear': runAskClear,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',
