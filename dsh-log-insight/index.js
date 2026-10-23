@@ -278,6 +278,56 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 把查询结果聚合成图表数据，供面板画柱状图。
+   * @param {object} plan 执行计划
+   * @param {object} result 查询结果
+   * @returns {{title: string, unit: string, items: Array<{label: string, value: number}>} | null} 图表数据
+   */
+  function buildChart(plan, result) {
+    if (result === null || typeof result !== 'object' || result.ok === false) return null;
+    const pack = (entries, title, unit, limit = 8) => {
+      const items = entries
+        .filter((entry) => typeof entry[1] === 'number' && entry[1] > 0)
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, limit)
+        .map(([label, value]) => ({ label: String(label).slice(0, 26), value }));
+      return items.length === 0 ? null : { title, unit, items };
+    };
+    const countBy = (rows, keyOf) => {
+      const counts = new Map();
+      for (const row of rows) {
+        const key = keyOf(row);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      return [...counts.entries()];
+    };
+
+    if (plan?.action === 'log_search') {
+      return pack(countBy(Array.isArray(result.hits) ? result.hits : [], (hit) => String(hit?.level ?? 'UNKNOWN').toUpperCase()), '按级别分布', '条');
+    }
+    if (plan?.action === 'trace_search') {
+      return pack(countBy(Array.isArray(result.items) ? result.items : [], (item) => String(item?.service ?? '未知')), '按服务分布', '条');
+    }
+    if (plan?.action === 'trace_detail') {
+      const spans = (Array.isArray(result.spans) ? result.spans : []).filter((span) => typeof span?.durationMs === 'number');
+      if (spans.length === 0) return null;
+      const slowest = [...spans].sort((left, right) => right.durationMs - left.durationMs).slice(0, 8);
+      return {
+        title: '最慢的段落',
+        unit: 'ms',
+        items: slowest.map((span) => ({
+          label: `${span.service ?? ''} ${span.uri ?? ''}`.trim().slice(0, 26) || '—',
+          value: Math.round(span.durationMs),
+        })),
+      };
+    }
+    if (plan?.action === 'service_status' && Array.isArray(result.items)) {
+      return pack(result.items.map((item) => [String(item?.name ?? '未知'), Number(item?.count ?? 0)]), '各服务调用量', '次');
+    }
+    return null;
+  }
+
+  /**
    * 自然语言问答：解析意图 → 执行查询 → 生成解读。
    * @param {object} payload 请求参数
    * @returns {Promise<object>} 问答结果
@@ -289,7 +339,7 @@ export function apply(ctx, config) {
       const plan = parsePlan(await callModel(PLANNER_PROMPT, question));
       const result = await executePlan(plan, payload?.env);
       const answer = await callModel(ANSWER_PROMPT, `用户问题：${question}\n\n查询结果：\n${summarizeForModel(plan, result)}`);
-      return { ok: true, question, plan, answer, result };
+      return { ok: true, question, plan, answer, result, chart: buildChart(plan, result) };
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
     }

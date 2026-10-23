@@ -1091,6 +1091,59 @@ window.__ModuleLoader__.load({
 
 
 		/**
+		 * 横向柱状图。纯 div 实现，不引入任何图表依赖。
+		 * @param {object} props 组件属性
+		 * @returns {object|null} 图表节点
+		 */
+		function MiniBarChart({ chart }) {
+			if (chart === null || typeof chart !== 'object') return null;
+			const items = Array.isArray(chart.items) ? chart.items.filter((item) => Number.isFinite(Number(item?.value))) : [];
+			if (items.length === 0) return null;
+			const max = Math.max(...items.map((item) => Number(item.value)), 1);
+			const palette = ['#2563eb', '#7c3aed', '#059669', '#ca8a04', '#dc2626', '#0891b2', '#64748b', '#db2777'];
+			return h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: S.cardLabel }, `${chart.title ?? '统计'}${chart.unit ? `（${chart.unit}）` : ''}`),
+				items.map((item, index) => h('div', {
+					key: `bar${index}`,
+					style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 },
+				},
+					h('span', {
+						style: {
+							...S.mono,
+							fontSize: 10.5,
+							width: 140,
+							flexShrink: 0,
+							overflow: 'hidden',
+							textOverflow: 'ellipsis',
+							whiteSpace: 'nowrap',
+							color: COLORS.label2,
+						},
+						title: String(item.label ?? ''),
+					}, String(item.label ?? '—')),
+					h('div', {
+						style: {
+							flex: 1,
+							height: 12,
+							background: COLORS.layer2,
+							borderRadius: 3,
+							overflow: 'hidden',
+							minWidth: 40,
+						},
+					},
+						h('div', {
+							style: {
+								width: `${Math.max(2, Math.round((Number(item.value) / max) * 100))}%`,
+								height: '100%',
+								background: palette[index % palette.length],
+								borderRadius: 3,
+							},
+						})),
+					h('span', {
+						style: { ...S.mono, fontSize: 10.5, width: 56, textAlign: 'right', flexShrink: 0 },
+					}, String(item.value)))));
+		}
+
+		/**
 		 * 在可查询接口里找与步骤描述匹配的一条，供点击跳转日志。
 		 * @param {string} text 步骤动作描述
 		 * @param {Array<object>} endpoints 可查询接口
@@ -1402,10 +1455,11 @@ window.__ModuleLoader__.load({
 			const [answer, setAnswer] = useState(memory.ask.answer);
 			const [plan, setPlan] = useState(memory.ask.plan);
 			const [result, setResult] = useState(memory.ask.result);
+			const [chart, setChart] = useState(memory.ask.chart ?? null);
 
 			useEffect(() => {
-				memory.ask = { question, answer, plan, result };
-			}, [question, answer, plan, result]);
+				memory.ask = { question, answer, plan, result, chart };
+			}, [question, answer, plan, result, chart]);
 
 			const ask = useCallback(async () => {
 				const text = question.trim();
@@ -1415,11 +1469,13 @@ window.__ModuleLoader__.load({
 				setAnswer('');
 				setPlan(null);
 				setResult(null);
+				setChart(null);
 				try {
 					const res = await callRpc('ask', { question: text }, 90000);
 					setAnswer(typeof res?.answer === 'string' ? res.answer : '');
 					setPlan(res?.plan ?? null);
 					setResult(res?.result ?? null);
+					setChart(res?.chart ?? null);
 				} catch (e) {
 					setError(String(e?.message ?? e));
 				} finally {
@@ -1433,6 +1489,7 @@ window.__ModuleLoader__.load({
 				'hall-restful 最近一小时的健康指标怎么样',
 			];
 
+			const chartCard = h(MiniBarChart, { chart });
 			const answerCard = answer === '' ? null : h('div', { style: { ...S.card, marginBottom: 12 } },
 				h('div', { style: S.cardLabel }, translate('answerLabel')),
 				h('div', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.7, fontSize: 13 } }, answer));
@@ -1474,6 +1531,7 @@ window.__ModuleLoader__.load({
 					}, ex))),
 				h(ErrorBox, { message: error }),
 				loading ? h('div', { style: S.empty }, translate('asking')) : null,
+				chartCard,
 				answerCard,
 				planLine,
 				resultView);
