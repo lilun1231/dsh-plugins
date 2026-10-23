@@ -513,7 +513,8 @@ export function apply(ctx, config) {
    */
   function collectContext(repoPath, uri, maxFiles = 9) {
     // 一次性批量搜索所有候选关键字：逐个关键字搜索每次都要扫全仓库（实测约 13 秒）
-    const candidates = searchJavaMany(repoPath, buildKeywords(uri), 40);
+    // limit 要给足：候选截断后再打分，会让真正命中的 Controller 排在截断线外
+    const candidates = searchJavaMany(repoPath, buildKeywords(uri), 200);
     const best = pickEndpoint(candidates, uri);
     if (best === null) return { endpoint: null, context: '' };
 
@@ -549,7 +550,7 @@ export function apply(ctx, config) {
 
       // 第 2 层：继续按被调用的服务变量名定位实现类
       let frontier = extractServiceVars(entry.snippet);
-      for (let depth = 0; depth < 2 && frontier.length > 0 && parts.length < maxFiles; depth++) {
+      for (let depth = 0; depth < 3 && frontier.length > 0 && parts.length < maxFiles; depth++) {
         const next = [];
         for (const name of frontier) {
           const file = findClassFile(repoPath, name);
