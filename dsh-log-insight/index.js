@@ -331,7 +331,7 @@ export function apply(ctx, config) {
    * @param {number} timeoutMs 等待上限
    * @returns {Promise<string>} 会话最终文本
    */
-  async function askSession(sessionId, task, timeoutMs = 260000) {
+  async function askSession(sessionId, task, timeoutMs = 200000) {
     let agents;
     try {
       agents = typeof ctx?.get === 'function' ? ctx.get('agents') : ctx?.agents;
@@ -355,11 +355,13 @@ export function apply(ctx, config) {
     });
 
     const deadline = Date.now() + timeoutMs;
-    let text = '';
+    const chunks = [];
+    let cursor = before;
     let ended = false;
     while (Date.now() < deadline) {
       for (const event of eventsOf(agent.session)) {
-        if (typeof event?.seq !== 'number' || event.seq <= before) continue;
+        if (typeof event?.seq !== 'number' || event.seq <= cursor) continue;
+        if (event.seq > before) cursor = Math.max(cursor, event.seq);
         if (event.type === 'assistant/message') {
           const blocks = event.data?.message?.content;
           if (Array.isArray(blocks)) {
@@ -367,14 +369,15 @@ export function apply(ctx, config) {
               .filter((block) => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
               .map((block) => block.text)
               .join('');
-            if (joined.trim() !== '') text = joined;
+            if (joined.trim() !== '') chunks.push(joined);
           }
         }
         if (event.type === 'turn/end') ended = true;
       }
-      if (ended && text !== '') break;
+      if (ended && chunks.length > 0) break;
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
+    const text = chunks.join('\n');
     if (text === '') throw new Error('会话没有返回内容（可能仍在分析，请到该会话查看）');
     return text;
   }
@@ -503,31 +506,19 @@ export function apply(ctx, config) {
   ].join('\\n');
 
   /**
-   * 从代码片段里提取被注入的 Service 接口名。
-   * @param {string} snippet 代码片段
-   * @returns {string[]} 接口名列表
-   */
-  function extractServiceNames(snippet) {
-    const names = new Set();
-    const pattern = /\bI[A-Z][A-Za-z0-9]*Service\b/g;
-    let matched;
-    while ((matched = pattern.exec(snippet)) !== null) {
-      names.add(matched[0]);
-      if (names.size >= 4) break;
-    }
-    return [...names];
-  }
-
-  /**
    * 收集接口分析所需的代码上下文：Controller 片段加一层 Service 实现。
    * @param {string} repoPath 仓库根目录
    * @param {string} uri 接口路径
    * @returns {{endpoint: object | null, context: string}} 定位结果与上下文
    */
   function collectContext(repoPath, uri, maxFiles = 9) {
-    for (const keyword of buildKeywords(uri)) {
-      const picked = pickEndpoint(searchJava(repoPath, keyword), uri);
-      if (picked === null) continue;
+    // 一次性批量搜索所有候选关键字：逐个关键字搜索每次都要扫全仓库（实测约 13 秒）
+    const candidates = searchJavaMany(repoPath, buildKeywords(uri), 40);
+    const best = pickEndpoint(candidates, uri);
+    if (best === null) return { endpoint: null, context: '' };
+
+    {
+      const picked = best;
 
       const parts = [];
       const seen = new Set();
@@ -558,7 +549,7 @@ export function apply(ctx, config) {
 
       // 第 2 层：继续按被调用的服务变量名定位实现类
       let frontier = extractServiceVars(entry.snippet);
-      for (let depth = 0; depth < 3 && frontier.length > 0 && parts.length < maxFiles; depth++) {
+      for (let depth = 0; depth < 2 && frontier.length > 0 && parts.length < maxFiles; depth++) {
         const next = [];
         for (const name of frontier) {
           const file = findClassFile(repoPath, name);
@@ -658,6 +649,7 @@ export function apply(ctx, config) {
     }
 
     // 优先委派给固定会话：它有完整工具，能逐层读代码，也便于排查思维链
+    let sessionError = '';
     if (analyzeSessionId !== '' && payload?.via !== 'local') {
       try {
         const reply = await askSession(analyzeSessionId, buildSessionTask(project, repoPath, uri));
@@ -676,8 +668,9 @@ export function apply(ctx, config) {
           saveAnalysis({ project, uri, title: result.title, summary: result.summary, steps: result.steps, endpoints: result.endpoints });
           return result;
         }
-      } catch {
-        // 会话不可用或超时，退回本地分析，面板不因会话问题而不可用
+      } catch (error) {
+        // 会话不可用或超时，退回本地分析；原因带回面板，避免用户以为是会话结果
+        sessionError = String(error?.message ?? error);
       }
     }
 
@@ -696,7 +689,12 @@ export function apply(ctx, config) {
         summary: analysis.summary,
         steps: analysis.steps,
         endpoints: analysis.endpoints,
-        source: { mode: 'local', file: endpoint.file.replace(repoPath, ''), line: endpoint.line },
+        source: {
+          mode: 'local',
+          file: endpoint.file.replace(repoPath, ''),
+          line: endpoint.line,
+          sessionError,
+        },
       };
       saveAnalysis({ project, uri, title: localResult.title, summary: localResult.summary, steps: localResult.steps, endpoints: localResult.endpoints });
       return localResult;
