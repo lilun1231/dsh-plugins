@@ -1090,6 +1090,21 @@ window.__ModuleLoader__.load({
 		}
 
 
+		/**
+		 * 在可查询接口里找与步骤描述匹配的一条，供点击跳转日志。
+		 * @param {string} text 步骤动作描述
+		 * @param {Array<object>} endpoints 可查询接口
+		 * @returns {object|null} 命中的接口
+		 */
+		function matchEndpoint(text, endpoints) {
+			if (typeof text !== 'string' || text === '') return null;
+			for (const endpoint of endpoints) {
+				const candidates = [endpoint.label, endpoint.uri].filter((item) => typeof item === 'string' && item !== '');
+				if (candidates.some((item) => text.includes(item))) return endpoint;
+			}
+			return null;
+		}
+
 		/** 各类步骤的配色与标签。 */
 		const STEP_KIND = {
 			http: { color: '#2563eb', label: 'HTTP' },
