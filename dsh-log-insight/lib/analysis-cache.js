@@ -63,8 +63,13 @@ export function saveAnalysis(entry, limit = MAX_ENTRIES) {
   };
   const items = [merged, ...rest].slice(0, Math.max(1, limit));
   const file = cachePath();
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ items }, null, 2), 'utf8');
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ items }, null, 2), 'utf8');
+  } catch {
+    // 写盘失败（权限、磁盘满）只是没有历史记录，不能因此让分析结果丢失
+    return readAnalysisCache();
+  }
   return items;
 }
 
@@ -81,8 +86,12 @@ export function touchCachedAnalysis(project, uri) {
   const updated = { ...target, hits: Number(target.hits ?? 0) + 1, lastUsedAt: new Date().toISOString() };
   const next = [updated, ...items.filter((item) => item !== target)];
   const file = cachePath();
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ items: next }, null, 2), 'utf8');
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ items: next }, null, 2), 'utf8');
+  } catch {
+    return target;
+  }
   return updated;
 }
 

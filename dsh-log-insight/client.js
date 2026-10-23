@@ -1161,6 +1161,7 @@ window.__ModuleLoader__.load({
 				if (value === '') return;
 				setLoading(true);
 				setError('');
+				setInterrupted(false);
 				try {
 					setData(await callRpc('analyze', { project, uri: value, force }, 300000));
 				} catch (e) {
@@ -1187,6 +1188,7 @@ window.__ModuleLoader__.load({
 				setShowHistory(false);
 				setLoading(true);
 				setError('');
+				setInterrupted(false);
 				(async () => {
 					try {
 						setData(await callRpc('analyze', { project: item.project, uri: item.uri }, 300000));
