@@ -43,6 +43,8 @@ window.__ModuleLoader__.load({
 			latestHint: '切走页面后请求会中断，可从这里取回会话里最近一次分析结果',
 			noLatest: '会话里还没有分析结果',
 			textOnly: '会话里最新一条是自然语言回复，不是结构化结果，已原样展示',
+			beansLabel: '涉及的服务 Bean',
+			middlewaresLabel: '调用的中台接口',
 			analyzing: '分析中…（读取代码并调用模型，约 10-30 秒）',
 			sequenceTitle: '调用时序',
 			clickToSearch: '蓝色接口可点击，直接跳转日志查询',
@@ -148,6 +150,8 @@ window.__ModuleLoader__.load({
 			latestHint: 'Leaving the page drops the running request — fetch the latest result from the session here',
 			noLatest: 'No analysis result in the session yet',
 			textOnly: 'The latest reply is plain text, not a structured result — shown as-is',
+			beansLabel: 'Service beans involved',
+			middlewaresLabel: 'Middle-platform calls',
 			analyzing: 'Analyzing… (reads code, calls model, 10-30s)',
 			sequenceTitle: 'Sequence',
 			clickToSearch: 'Blue endpoints jump to log query',
@@ -1114,6 +1118,76 @@ window.__ModuleLoader__.load({
 		const CHART_COLORS = ['#2563eb', '#7c3aed', '#059669', '#ca8a04', '#dc2626', '#0891b2', '#64748b', '#db2777'];
 
 		/**
+		 * 中台接口清单：哪几个功能号被调用、分别做什么。
+		 * @param {object} props 组件属性
+		 * @returns {object|null} 清单节点
+		 */
+		function MiddlewareList({ items }) {
+			if (!Array.isArray(items) || items.length === 0) return null;
+			return h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: S.cardLabel }, translate('middlewaresLabel')),
+				items.map((item, index) => h('div', {
+					key: `mw${index}`,
+					style: {
+						marginBottom: index < items.length - 1 ? 8 : 0,
+						paddingBottom: index < items.length - 1 ? 8 : 0,
+						borderBottom: index < items.length - 1 ? `1px solid ${COLORS.border1}` : 'none',
+					},
+				},
+					h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', marginBottom: 2 } },
+					h('span', {
+						style: {
+							...S.mono,
+							fontSize: 11,
+							padding: '1px 6px',
+							borderRadius: 3,
+							color: '#7c3aed',
+							border: '1px solid #7c3aed',
+						},
+					}, item.funcNo || '—'),
+					item.service !== ''
+						? h('span', { style: { fontSize: 11.5, color: COLORS.label2 } }, item.service)
+						: null),
+					h('div', { style: { fontSize: 11.5, lineHeight: 1.6 } }, item.purpose || ''),
+					item.bean !== ''
+						? h('div', { style: { ...S.mono, fontSize: 10, color: COLORS.label2, marginTop: 2 } }, `调用方 ${item.bean}`)
+						: null)));
+		}
+
+		/**
+		 * 涉及的 bean 清单：每个 bean 各自的职责，以及它对接的中台功能号。
+		 * @param {object} props 组件属性
+		 * @returns {object|null} 清单节点
+		 */
+		function BeanList({ beans }) {
+			if (!Array.isArray(beans) || beans.length === 0) return null;
+			return h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: S.cardLabel }, `${translate('beansLabel')}（${beans.length}）`),
+				beans.map((bean, index) => h('div', {
+					key: `bn${index}`,
+					style: {
+						marginBottom: index < beans.length - 1 ? 10 : 0,
+						paddingBottom: index < beans.length - 1 ? 10 : 0,
+						borderBottom: index < beans.length - 1 ? `1px solid ${COLORS.border1}` : 'none',
+					},
+				},
+					h('div', { style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', marginBottom: 3 } },
+					h('span', { style: { ...S.mono, fontSize: 11.5, fontWeight: 600 } }, bean.name || '—'),
+					bean.funcNo !== ''
+						? h('span', {
+							style: { ...S.mono, fontSize: 10, padding: '1px 5px', borderRadius: 3, color: '#7c3aed', border: '1px solid #7c3aed' },
+						}, bean.funcNo)
+						: null),
+				bean.lisaName !== ''
+					? h('div', { style: { ...S.mono, fontSize: 10, color: COLORS.label2, marginBottom: 2 } }, bean.lisaName)
+					: null,
+					h('div', { style: { fontSize: 11.5, lineHeight: 1.65, color: COLORS.label1 } }, bean.responsibility || ''),
+				bean.file !== ''
+					? h('div', { style: { ...S.mono, fontSize: 10, color: COLORS.label2, marginTop: 2 } }, `${bean.file}${bean.line ? `:${bean.line}` : ''}`)
+					: null)));
+		}
+
+		/**
 		 * 问答执行进度：把每个阶段跑成一条时间线，卡在哪一步一眼可见。
 		 * @param {object} props 组件属性
 		 * @returns {object|null} 进度节点
@@ -1481,7 +1555,9 @@ window.__ModuleLoader__.load({
 				h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' } },
 					h('span', { style: S.chip }, translate('sequenceTitle')),
 					h('span', { style: { fontSize: 11, color: COLORS.label2 } }, translate('clickToSearch'))),
-				body);
+				body,
+				h(MiddlewareList, { items: data.middlewares }),
+				h(BeanList, { beans: data.beans }));
 
 			return h('div', null,
 				h('div', { style: S.form },

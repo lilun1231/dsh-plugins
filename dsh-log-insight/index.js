@@ -646,13 +646,15 @@ export function apply(ctx, config) {
       '',
       '要求：',
       '1. 从 Controller 入口开始逐层向下追，不要只看一层：Controller → Service 实现 → 配置类（@Bean + @LisaService 生成的服务）→ 中台调用（setFuncNo 的功能号）。',
-      '2. 每条调用写明方法名、参数或条件，关键判断与组装逻辑用 Note 说明，并行调用用 par/and 表示。',
-      '3. 在回复最后输出一个 JSON 代码块（用三个反引号包住，标注 json），结构：',
-      '{"title":"一句话用途","summary":"两三句业务逻辑","steps":[{"from":"客户端","to":"NewShareController","action":"GET /rest/xxx","kind":"http","uri":"/rest/xxx","note":"接口入口","group":""}],"endpoints":[{"label":"GET /rest/xxx","uri":"/rest/xxx","kind":"http"}]}',
-      '4. endpoints 列出所有可查日志的入口：HTTP 接口给完整路径，中台调用给功能号（kind 用 middle）。',
-      '5. kind 取值：http / service / middle（中台）/ dao / return / note；group 用于并行或同组步骤。',
-      '6. uri 只给可查日志的接口，action 文案要与 endpoints 的 label 保持一致。',
-      '6. 只写代码里有依据的调用，不确定的用 Note 标注。',
+      '2. 每条调用写明方法名、参数或条件；每步的 note 必须说清这一环做什么（读了什么参数、做了什么判断、组装了什么），不能留空或只写服务名。',
+      '3. 分支要拆成独立步骤：按参数分流、if 判断、循环处理都要体现，并在 note 里写明判断条件。',
+      '4. 在回复最后输出一个 JSON 代码块（用三个反引号包住，标注 json），结构：',
+      '{"title":"一句话用途","summary":"三四句业务逻辑","steps":[{"from":"客户端","to":"NewShareController","action":"GET /rest/xxx","kind":"http","uri":"/rest/xxx","note":"入口方法 xxx：解析什么参数、做什么分发","group":""}],"beans":[{"name":"beanName","lisaName":"hall_app_xxx","funcNo":"CBD_XXX","responsibility":"这个 bean 实际执行的业务逻辑","file":"XxxGenConfig.java","line":128}],"middlewares":[{"funcNo":"CBD_XXX","service":"中台","purpose":"这个中台接口做什么","bean":"调用它的 bean"}],"endpoints":[{"label":"GET /rest/xxx","uri":"/rest/xxx","kind":"http"}]}',
+      '5. beans 要把链路里每个 @Bean / @LisaService 定义都列出来，一个都不许漏（这些工程常由 *ServiceGenConfig 配置类生成），responsibility 写实际逻辑而不是类名翻译；不调中台的 bean，funcNo 留空字符串。',
+      '6. middlewares 要列出代码里所有 setFuncNo(...) 的中台接口，funcNo 原样照抄，purpose 说明业务用途，bean 填调用方。',
+      '7. endpoints 列出所有可查日志的入口：HTTP 接口给完整路径，中台调用给功能号（kind 用 middle）；action 文案要与 endpoints 的 label 保持一致。',
+      '8. kind 取值：http / service / middle（中台）/ dao / return / note；group 用于并行或同组步骤。',
+      '9. 只写代码里有依据的调用，不确定的用 Note 标注；看不到的中台地址、功能号一律留空，不要猜。',
     ].join('\n');
   }
 
@@ -712,6 +714,8 @@ export function apply(ctx, config) {
       summary: cleanText(value.summary),
       steps,
       endpoints,
+      beans: parseBeans(value.beans),
+      middlewares: parseMiddlewares(value.middlewares),
     };
   }
 
@@ -721,39 +725,55 @@ export function apply(ctx, config) {
 
   /** 接口分析提示词。 */
   const ANALYZE_PROMPT = [
-    '你是 Java 后端架构师。根据给定代码分析接口的执行逻辑，画成 Mermaid 时序图。',
+    '你是 Java 后端架构师。根据给定代码，把这个接口的完整执行链路拆清楚。',
     '',
     '只输出 JSON，不要解释，格式：',
     '{',
     '  "title": "接口用途，一句话",',
-    '  "summary": "两三句话说明业务逻辑",',
+    '  "summary": "三四句话说明业务逻辑：这个接口做什么、关键判断在哪、最终返回什么",',
     '  "steps": [',
-    '    {"from":"客户端","to":"XxxController","action":"GET /homepage/info/qry","kind":"http","uri":"/homepage/info/qry","note":"接口入口","group":""},',
-    '    {"from":"XxxController","to":"IHomepageService","action":"qryColumnList(param)","kind":"service","uri":"","note":"Lisa RPC","group":""},',
-    '    {"from":"HomepageServiceImpl","to":"中台 TC 141.87","action":"setFuncNo(CBD_XXX)","kind":"middle","uri":"CBD_XXX","note":"中台功能号","group":""},',
-    '    {"from":"XxxController","to":"客户端","action":"RespBodyInfo","kind":"return","uri":"","note":"","group":""}',
+    '    {"from":"客户端","to":"NewShareController","action":"GET /rest/newshare/{type}/market/info/list","kind":"http","uri":"/rest/newshare/{type}/market/info/list","note":"入口方法 marketInfoList：解析 type 参数并按市场类型分发","group":""},',
+    '    {"from":"NewShareController","to":"NewShareListInfoQryEntranceService","action":"marketInfoList(param)","kind":"service","uri":"","note":"通过 Lisa RPC 调 hall_app_newShareListInfoQryEntranceService","group":""},',
+    '    {"from":"NewShareListInfoQryEntranceService","to":"中台 新股额度查询","action":"setFuncNo(CBD_NEWSTK_PERCHK_RTN)","kind":"middle","uri":"CBD_NEWSTK_PERCHK_RTN","note":"按 type 分流到 WithBondService / WithStkService 两个 bean","group":""},',
+    '    {"from":"NewShareListInfoQryEntranceService","to":"客户端","action":"RespBodyInfo","kind":"return","uri":"","note":"组装列表返回","group":""}',
+    '  ],',
+    '  "beans": [',
+    '    {"name":"newShareListInfoQryEntranceService","lisaName":"hall_app_newShareListInfoQryEntranceService","funcNo":"","responsibility":"入口 bean：接收 Controller 请求，按市场类型选择下游子 bean","file":"NewShareInfoServiceGenConfig.java","line":128},',
+    '    {"name":"newShareListInfoQryWithStkService","funcNo":"CBD_NEWSTK_PERCHK_RTN","responsibility":"股票市场分支：调用中台新股额度查询并转换结果","file":"","line":109}',
+    '  ],',
+    '  "middlewares": [',
+    '    {"funcNo":"CBD_NEWSTK_PERCHK_RTN","service":"中台","purpose":"新股额度校验查询","bean":"newShareListInfoQryWithStkService"}',
     '  ],',
     '  "endpoints": [',
-    '    {"label":"GET /homepage/info/qry","uri":"/homepage/info/qry","kind":"http"},',
-    '    {"label":"TC 141.189 个股异动解读","uri":"141.189","kind":"middle"}',
+    '    {"label":"GET /rest/newshare/{type}/market/info/list","uri":"/rest/newshare/{type}/market/info/list","kind":"http"},',
+    '    {"label":"CBD_NEWSTK_PERCHK_RTN 新股额度校验查询","uri":"CBD_NEWSTK_PERCHK_RTN","kind":"middle"}',
     '  ]',
     '}',
     '',
-    'Mermaid 要求：',
-    '- 首行 sequenceDiagram，第二行 autonumber',
-    '- 用 participant 别名 as 中文说明；参与者要覆盖代码里出现的全部服务、外部系统与中台',
-    '- 调用用 ->>，返回用 -->>，并行调用用 par / and / end',
-    '- 关键判断、参数透传、字段变更、组装逻辑用 Note over 说明',
-    '- 中台调用（如 TC 141.189）单独作为 participant，并在 endpoints 里给出编码',
-    '- 消息文案里写清参数名、条件或字段，越具体越好',
+    'steps 要求（这是最重要的部分，宁多勿少）：',
+    '- 每一步的 note 必须写清这一环到底做什么：读了哪些入参、做了什么判断、调了谁、组装了什么，不能留空或写「调用服务」这种废话',
+    '- 分支要拆成独立步骤：按 type 分流、if 判断、循环处理，都要体现，并在 note 里写明判断条件',
+    '- action 要带方法名和关键参数名，不要只写服务名',
+    '- kind 取值：http（HTTP 入口/出口）、service（服务间调用）、middle（中台调用）、dao（存储/缓存）、return（返回）、note（补充说明）',
+    '- group 用于标记并行调用或同一分支，同一组的步骤填相同标识',
+    '',
+    'beans 要求：',
+    '- 把链路里每个 @Bean / @LisaService 定义都列出来，一个都别漏（这些工程常由 *ServiceGenConfig 配置类生成）',
+    '- responsibility 要说明这个 bean 实际执行的业务逻辑，不是它的类名翻译',
+    '- funcNo 填它调用的中台功能号；不调中台就留空字符串',
+    '- file / line 尽量填，找不到就留空',
+    '',
+    'middlewares 要求：',
+    '- 列出代码里所有 setFuncNo(...) 的中台接口，funcNo 必填、原样照抄',
+    '- purpose 说明这个中台接口的业务用途',
+    '- bean 填调用它的那个 bean 名',
     '',
     'endpoints 要求：',
-    '- 列出所有可查询日志的接口：HTTP 接口给完整路径（含类级前缀），中台接口给编码',
-    '- label 必须与 steps 里 action 的文案保持一致，便于前端高亮；uri 只填可查日志的接口，其余留空',
-    '- kind 取值：http / service / middle / dao / return / note；group 用于标记并行或同组步骤',
+    '- 列出所有可查询日志的接口：HTTP 给完整路径（含类级前缀），中台给功能号',
+    '- label 与 steps 里的 action 文案保持一致，便于前端高亮',
     '',
-    '规则：只写代码里有依据的调用，不要编造；不确定的地方用 Note 标注「需结合实现确认」。',
-  ].join('\\n');
+    '规则：只写代码里有依据的内容，不要编造。代码里看不到的中台服务地址、功能号一律留空，不要猜。',
+  ].join('\n');
 
   /**
    * 收集接口分析所需的代码上下文：Controller 片段加一层 Service 实现。
@@ -761,7 +781,7 @@ export function apply(ctx, config) {
    * @param {string} uri 接口路径
    * @returns {{endpoint: object | null, context: string}} 定位结果与上下文
    */
-  function collectContext(repoPath, uri, maxFiles = 9) {
+  function collectContext(repoPath, uri, maxFiles = 12) {
     // 一次性批量搜索所有候选关键字：逐个关键字搜索每次都要扫全仓库（实测约 13 秒）
     // limit 要给足：候选截断后再打分，会让真正命中的 Controller 排在截断线外
     const candidates = searchJavaMany(repoPath, buildKeywords(uri), 200);
@@ -857,7 +877,45 @@ export function apply(ctx, config) {
       summary: cleanText(value.summary),
       steps,
       endpoints,
+      beans: parseBeans(value.beans),
+      middlewares: parseMiddlewares(value.middlewares),
     };
+  }
+
+  /**
+   * 解析链路里涉及的 bean 定义。
+   * @param {unknown} raw 原始数据
+   * @returns {Array<object>} bean 列表
+   */
+  function parseBeans(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((item) => ({
+        name: cleanText(item?.name),
+        lisaName: cleanText(item?.lisaName),
+        funcNo: cleanText(item?.funcNo),
+        responsibility: cleanText(item?.responsibility),
+        file: cleanText(item?.file),
+        line: Number(item?.line ?? 0) || 0,
+      }))
+      .filter((item) => item.name !== '' || item.responsibility !== '');
+  }
+
+  /**
+   * 解析代码里调用的中台接口。
+   * @param {unknown} raw 原始数据
+   * @returns {Array<object>} 中台接口列表
+   */
+  function parseMiddlewares(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((item) => ({
+        funcNo: cleanText(item?.funcNo),
+        service: cleanText(item?.service),
+        purpose: cleanText(item?.purpose),
+        bean: cleanText(item?.bean),
+      }))
+      .filter((item) => item.funcNo !== '' || item.purpose !== '');
   }
 
   /**
@@ -887,6 +945,8 @@ export function apply(ctx, config) {
             summary: cached.summary,
             steps: cached.steps,
             endpoints: Array.isArray(cached.endpoints) ? cached.endpoints : [],
+            beans: Array.isArray(cached.beans) ? cached.beans : [],
+            middlewares: Array.isArray(cached.middlewares) ? cached.middlewares : [],
             source: {
               mode: 'cache',
               updatedAt: cached.updatedAt,
@@ -914,9 +974,11 @@ export function apply(ctx, config) {
             summary: parsed.summary,
             steps: parsed.steps,
             endpoints: parsed.endpoints,
+            beans: parsed.beans,
+            middlewares: parsed.middlewares,
             source: { mode: 'session', sessionId: analyzeSessionId },
           };
-          saveAnalysis({ project, uri, title: result.title, summary: result.summary, steps: result.steps, endpoints: result.endpoints });
+          saveAnalysis({ project, uri, title: result.title, summary: result.summary, steps: result.steps, endpoints: result.endpoints, beans: result.beans, middlewares: result.middlewares });
           return result;
         }
       } catch (error) {
@@ -930,7 +992,20 @@ export function apply(ctx, config) {
       if (endpoint === null) {
         return { ok: false, reason: `在 ${project} 里没有找到接口 ${uri}，请检查项目或路径` };
       }
-      const prompt = [`项目：${project}`, `接口：${uri}`, '', '代码如下：', context.slice(0, 40000)].join('\n');
+      // 从上下文里直接把中台功能号和 bean 名抠出来，避免模型漏看或看错
+      const funcNos = [...new Set([...context.matchAll(/setFuncNo\(\s*["']([^"']+)["']\s*\)/g)].map((match) => match[1]))];
+      const beanNames = [...new Set([...context.matchAll(/@Bean\(\s*(?:name\s*=\s*)?["']([^"']+)["']/g)].map((match) => match[1]))];
+      const facts = [];
+      if (funcNos.length > 0) facts.push(`代码里出现的 setFuncNo（必须全部列入 middlewares）：\n${funcNos.map((n) => `- ${n}`).join('\n')}`);
+      if (beanNames.length > 0) facts.push(`代码里出现的 @Bean 名（逐个说明职责）：\n${beanNames.map((n) => `- ${n}`).join('\n')}`);
+      const prompt = [
+        `项目：${project}`,
+        `接口：${uri}`,
+        '',
+        facts.length > 0 ? `${facts.join('\n\n')}\n` : '',
+        '代码如下：',
+        context.slice(0, 40000),
+      ].join('\n');
       const analysis = parseAnalysis(await callModel(ANALYZE_PROMPT, prompt));
       const localResult = {
         ok: true,
@@ -940,6 +1015,8 @@ export function apply(ctx, config) {
         summary: analysis.summary,
         steps: analysis.steps,
         endpoints: analysis.endpoints,
+        beans: analysis.beans,
+        middlewares: analysis.middlewares,
         source: {
           mode: 'local',
           file: endpoint.file.replace(repoPath, ''),
@@ -947,7 +1024,7 @@ export function apply(ctx, config) {
           sessionError,
         },
       };
-      saveAnalysis({ project, uri, title: localResult.title, summary: localResult.summary, steps: localResult.steps, endpoints: localResult.endpoints });
+      saveAnalysis({ project, uri, title: localResult.title, summary: localResult.summary, steps: localResult.steps, endpoints: localResult.endpoints, beans: localResult.beans, middlewares: localResult.middlewares });
       return localResult;
     } catch (error) {
       return { ok: false, reason: String(error?.message ?? error) };
@@ -1016,6 +1093,8 @@ export function apply(ctx, config) {
             summary: parsed.summary,
             steps: parsed.steps,
             endpoints: parsed.endpoints,
+            beans: parsed.beans,
+            middlewares: parsed.middlewares,
             source: { mode: 'session-latest', sessionId: analyzeSessionId },
           };
           // 只有调用方明确告诉是哪个接口时才落库，避免写入无法复用的脏数据
