@@ -131,6 +131,49 @@ window.__ModuleLoader__.load({
 			exportPdfHint: '导出使用平台页面自带的「导出为pdf文件」功能',
 			spans: '调用段落',
 			empty: '填写条件后点击查询',
+			tabSettings: '设置',
+			groupKibana: 'Kibana 日志查询',
+			groupGovernance: '服务治理（调用链 / 服务状态）',
+			groupDefaults: '查询默认值',
+			groupProjects: '代码仓库（接口分析）',
+			groupLlm: '模型（问一问）',
+			groupMisc: '其它',
+			fBaseUrl: '地址',
+			fHibbert: 'Hibbert 地址',
+			fUsername: '账号',
+			fPassword: '密码',
+			fIdp: 'IdP',
+			fIndex: '索引',
+			fInsecure: '允许自签证书',
+			fNsFat: 'fat 命名空间',
+			fNsUat: 'uat 命名空间',
+			fNsDev: 'dev 命名空间',
+			fProjectId: '项目号',
+			fProjectName: '项目名',
+			fDatacenter: '数据中心头',
+			fEnv: '默认环境',
+			fTimezone: '时区',
+			fWindow: '默认时间窗（分钟）',
+			fMaxHits: '单次最多条数',
+			fExportLimit: '导出上限',
+			fProjects: '每行一个：名称=绝对路径',
+			fLlmProvider: '提供方',
+			fLlmModel: '模型',
+			fSession: '委派会话 ID',
+			settingsIntro: '内网地址与账号密码只保存在本机，插件仓库里只有空模板',
+			settingsPathLabel: '配置文件',
+			settingsKeepPassword: '没设过密码',
+			settingsClear: '清除该密码',
+			settingsSave: '保存',
+			settingsSaving: '保存中…',
+			settingsSaved: '已保存，下一次查询即生效',
+			settingsTest: '连通性自检',
+			settingsTesting: '自检中…',
+			settingsReload: '重新读取',
+			settingsLoad: '读取中…',
+			settingsFailed: '设置操作失败',
+			settingsTestOk: '连通正常',
+			settingsTestFail: '连接失败',
 		};
 		const en = {
 			nav: 'Log Insight',
@@ -238,6 +281,49 @@ window.__ModuleLoader__.load({
 			exportPdfHint: 'Export uses the platform page built-in PDF export',
 			spans: 'Spans',
 			empty: 'Fill in and search',
+			tabSettings: 'Settings',
+			groupKibana: 'Kibana log query',
+			groupGovernance: 'Governance (traces / service health)',
+			groupDefaults: 'Query defaults',
+			groupProjects: 'Code repositories (API analysis)',
+			groupLlm: 'Model (ask)',
+			groupMisc: 'Other',
+			fBaseUrl: 'Base URL',
+			fHibbert: 'Hibbert URL',
+			fUsername: 'Username',
+			fPassword: 'Password',
+			fIdp: 'IdP',
+			fIndex: 'Index',
+			fInsecure: 'Allow self-signed cert',
+			fNsFat: 'fat namespace',
+			fNsUat: 'uat namespace',
+			fNsDev: 'dev namespace',
+			fProjectId: 'Project id',
+			fProjectName: 'Project name',
+			fDatacenter: 'Datacenter header',
+			fEnv: 'Default env',
+			fTimezone: 'Time zone',
+			fWindow: 'Default window (minutes)',
+			fMaxHits: 'Max hits per query',
+			fExportLimit: 'Export limit',
+			fProjects: 'One per line: name=absolute path',
+			fLlmProvider: 'Provider',
+			fLlmModel: 'Model',
+			fSession: 'Delegated session id',
+			settingsIntro: 'Internal URLs and credentials stay on this machine; the repository only carries an empty template',
+			settingsPathLabel: 'Config file',
+			settingsKeepPassword: 'No password yet',
+			settingsClear: 'Clear this password',
+			settingsSave: 'Save',
+			settingsSaving: 'Saving…',
+			settingsSaved: 'Saved, effective on the next query',
+			settingsTest: 'Test connection',
+			settingsTesting: 'Testing…',
+			settingsReload: 'Reload',
+			settingsLoad: 'Loading…',
+			settingsFailed: 'Settings operation failed',
+			settingsTestOk: 'Connected',
+			settingsTestFail: 'Connection failed',
 		};
 		//#endregion
 
@@ -413,6 +499,7 @@ window.__ModuleLoader__.load({
 			trace: { mode: 'serial', serialNo: '', uri: '', keyword: '', service: '', traceType: 'http', minutes: 30, detail: null, picked: null, list: null },
 			status: { service: 'hall-restful', minutes: 60, stats: null },
 			audit: { items: null },
+			settings: { draft: null, path: '', probe: null },
 			ask: { question: '', answer: '', plan: null, result: null },
 			analyze: { project: 'hall-micro-serv-3', uri: '', data: null },
 		};
@@ -1111,6 +1198,308 @@ window.__ModuleLoader__.load({
 								h('span', {
 									style: { fontSize: 11, width: 110, flexShrink: 0, textAlign: 'right', color: item.ok ? COLORS.success : COLORS.error },
 								}, item.ok ? translate('okLabel') : `${translate('failLabel')} ${String(item.error ?? '').slice(0, 18)}`))))));
+		}
+
+
+		/** 设置项输入框：标签 + 输入 + 可选说明。 */
+		function SettingInput({ label, value, onChange, placeholder, hint, type, minWidth }) {
+			return h('label', { style: { ...S.field, minWidth: minWidth ?? 200 } },
+				h('span', { style: S.label }, label),
+				h('input', {
+					style: S.input,
+					type: type ?? 'text',
+					value: value ?? '',
+					placeholder: placeholder ?? '',
+					onChange: (event) => onChange(event.target.value),
+				}),
+				hint === undefined ? null : h('span', { style: { fontSize: 10, color: COLORS.label2 } }, hint));
+		}
+
+		/**
+		 * 把 Host 返回的生效配置摊平成表单草稿（数字转字符串，项目表转多行文本）。
+		 * @param {object} settings 生效配置
+		 * @returns {object} 表单草稿
+		 */
+		function toDraft(settings) {
+			const s = settings !== null && typeof settings === 'object' ? settings : {};
+			const kibana = s.kibana ?? {};
+			const gov = s.governance ?? {};
+			const dft = s.defaults ?? {};
+			const llm = s.llm ?? {};
+			const ns = kibana.namespaceByEnv ?? {};
+			return {
+				kibanaBaseUrl: String(kibana.baseUrl ?? ''),
+				kibanaIdp: String(kibana.idp ?? ''),
+				kibanaUsername: String(kibana.username ?? ''),
+				kibanaPassword: '',
+				kibanaIndex: String(kibana.index ?? ''),
+				kibanaInsecure: kibana.insecure !== false,
+				kibanaHasPassword: kibana.hasPassword === true,
+				nsFat: String(ns.fat ?? ''),
+				nsUat: String(ns.uat ?? ''),
+				nsDev: String(ns.dev ?? ''),
+				govBaseUrl: String(gov.baseUrl ?? ''),
+				govHibbert: String(gov.hibbertBaseUrl ?? ''),
+				govUsername: String(gov.username ?? ''),
+				govPassword: '',
+				govHasPassword: gov.hasPassword === true,
+				govProjectId: String(gov.projectId ?? ''),
+				govProjectName: String(gov.projectName ?? ''),
+				govDatacenter: String(gov.datacenterHeader ?? ''),
+				env: String(dft.env ?? 'fat'),
+				timezone: String(dft.timezone ?? ''),
+				windowMinutes: String(dft.windowMinutes ?? ''),
+				maxHits: String(dft.maxHits ?? ''),
+				exportLimit: String(dft.exportLimit ?? ''),
+				projectsText: Object.entries(s.projects ?? {}).map(([name, value]) => `${name}=${value}`).join('\n'),
+				llmProvider: String(llm.provider ?? ''),
+				llmModel: String(llm.model ?? ''),
+				analyzeSessionId: String(s.analyzeSessionId ?? ''),
+				clearKibana: false,
+				clearGovernance: false,
+			};
+		}
+
+		/**
+		 * 把表单草稿还原成 Host 接受的配置载荷。
+		 * @param {object} draft 表单草稿
+		 * @returns {object} 配置载荷
+		 */
+		function fromDraft(draft) {
+			const projects = {};
+			for (const raw of String(draft.projectsText ?? '').split('\n')) {
+				const line = raw.trim();
+				if (line === '' || line.startsWith('#')) continue;
+				const eq = line.indexOf('=');
+				const colon = line.indexOf(':');
+				const at = eq >= 0 ? eq : colon;
+				if (at <= 0) continue;
+				const name = line.slice(0, at).trim();
+				const value = line.slice(at + 1).trim();
+				if (name !== '' && value !== '') projects[name] = value;
+			}
+			const clearSecrets = [];
+			if (draft.clearKibana === true) clearSecrets.push('kibana');
+			if (draft.clearGovernance === true) clearSecrets.push('governance');
+			return {
+				kibana: {
+					baseUrl: String(draft.kibanaBaseUrl ?? '').trim(),
+					idp: String(draft.kibanaIdp ?? '').trim(),
+					username: String(draft.kibanaUsername ?? '').trim(),
+					password: String(draft.kibanaPassword ?? ''),
+					index: String(draft.kibanaIndex ?? '').trim(),
+					insecure: draft.kibanaInsecure !== false,
+					namespaceByEnv: {
+						fat: String(draft.nsFat ?? '').trim(),
+						uat: String(draft.nsUat ?? '').trim(),
+						dev: String(draft.nsDev ?? '').trim(),
+					},
+				},
+				governance: {
+					baseUrl: String(draft.govBaseUrl ?? '').trim(),
+					hibbertBaseUrl: String(draft.govHibbert ?? '').trim(),
+					username: String(draft.govUsername ?? '').trim(),
+					password: String(draft.govPassword ?? ''),
+					projectId: String(draft.govProjectId ?? '').trim(),
+					projectName: String(draft.govProjectName ?? '').trim(),
+					datacenterHeader: String(draft.govDatacenter ?? '').trim(),
+				},
+				defaults: {
+					env: String(draft.env ?? 'fat').trim() || 'fat',
+					timezone: String(draft.timezone ?? '').trim() || 'Asia/Shanghai',
+					windowMinutes: String(draft.windowMinutes ?? '').trim(),
+					maxHits: String(draft.maxHits ?? '').trim(),
+					exportLimit: String(draft.exportLimit ?? '').trim(),
+				},
+				projects,
+				llm: {
+					provider: String(draft.llmProvider ?? '').trim(),
+					model: String(draft.llmModel ?? '').trim(),
+				},
+				analyzeSessionId: String(draft.analyzeSessionId ?? '').trim(),
+				clearSecrets,
+			};
+		}
+
+		/** 设置 Tab：本机私有配置的可视化编辑（地址、账号、密码、项目路径等）。 */
+		function SettingsTab() {
+			const [draft, setDraft] = useState(memory.settings.draft);
+			const [path, setPath] = useState(memory.settings.path ?? '');
+			const [probe, setProbe] = useState(memory.settings.probe ?? null);
+			const [loading, setLoading] = useState(false);
+			const [saving, setSaving] = useState(false);
+			const [testing, setTesting] = useState(false);
+			const [error, setError] = useState('');
+			const [notice, setNotice] = useState('');
+
+			const load = useCallback(async () => {
+				setLoading(true);
+				setError('');
+				setNotice('');
+				try {
+					const res = await callRpc('settings-get', {}, 15000);
+					const next = toDraft(res.settings);
+					setDraft(next);
+					setPath(String(res.path ?? ''));
+					memory.settings = { ...memory.settings, draft: next, path: String(res.path ?? '') };
+				} catch (e) {
+					setError(String(e?.message ?? e));
+				} finally {
+					setLoading(false);
+				}
+			}, []);
+
+			useEffect(() => {
+				if (draft === null) load();
+			}, []);
+
+			useEffect(() => {
+				memory.settings = { ...memory.settings, draft };
+			}, [draft]);
+
+			const patch = useCallback((key, value) => {
+				setDraft((prev) => ({ ...(prev ?? {}), [key]: value }));
+			}, []);
+
+			const save = useCallback(async () => {
+				if (draft === null) return;
+				setSaving(true);
+				setError('');
+				setNotice('');
+				try {
+					const res = await callRpc('settings-save', { settings: fromDraft(draft) }, 30000);
+					setDraft(toDraft(res.settings));
+					setPath(String(res.path ?? path));
+					setNotice(translate('settingsSaved'));
+				} catch (e) {
+					setError(`${translate('settingsFailed')}：${String(e?.message ?? e)}`);
+				} finally {
+					setSaving(false);
+				}
+			}, [draft, path]);
+
+			const test = useCallback(async () => {
+				setTesting(true);
+				setError('');
+				setNotice('');
+				try {
+					const res = await callRpc('settings-test', {}, 60000);
+					setProbe(res);
+					memory.settings = { ...memory.settings, probe: res };
+				} catch (e) {
+					setError(`${translate('settingsFailed')}：${String(e?.message ?? e)}`);
+				} finally {
+					setTesting(false);
+				}
+			}, []);
+
+			if (draft === null) {
+				return h('div', { style: S.empty }, loading ? translate('settingsLoad') : translate('empty'));
+			}
+
+			const text = (key, label, extra) => h(SettingInput, {
+				label,
+				value: draft[key],
+				onChange: (value) => patch(key, value),
+				...(extra ?? {}),
+			});
+
+			const secret = (key, hasKey, clearKey, label) => h('label', { style: { ...S.field, minWidth: 200 } },
+				h('span', { style: S.label }, label),
+				h('input', {
+					style: S.input,
+					type: 'password',
+					value: draft[key] ?? '',
+					placeholder: draft[hasKey] === true ? '••••••（已保存，留空不改）' : translate('settingsKeepPassword'),
+					onChange: (event) => patch(key, event.target.value),
+				}),
+				h('label', { style: { display: 'flex', gap: 4, alignItems: 'center', fontSize: 10, color: COLORS.label2, cursor: 'pointer' } },
+					h('input', {
+						type: 'checkbox',
+						checked: draft[clearKey] === true,
+						onChange: (event) => patch(clearKey, event.target.checked),
+					}),
+					translate('settingsClear')));
+
+			const section = (title, children, hint) => h('div', { style: { ...S.card, marginBottom: 12 } },
+				h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 8 } }, title),
+				h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } }, children),
+				hint === undefined ? null : h('div', { style: S.hint }, hint));
+
+			const probeRow = (name, item) => {
+				if (item === null || item === undefined) return null;
+				return h('span', {
+					style: { ...S.chip, color: item.ok ? COLORS.success : COLORS.error },
+				}, item.ok
+					? `${name}：${translate('settingsTestOk')}（${item.durationMs ?? 0}ms）`
+					: `${name}：${translate('settingsTestFail')}（${String(item.reason ?? '').slice(0, 60)}）`);
+			};
+
+			return h('div', null,
+				h('div', { style: { ...S.form, marginBottom: 8 } },
+					h('button', { style: S.button(true), onClick: save, disabled: saving || loading, type: 'button' },
+						saving ? translate('settingsSaving') : translate('settingsSave')),
+					h('button', { style: S.button(false), onClick: test, disabled: testing || loading, type: 'button' },
+						testing ? translate('settingsTesting') : translate('settingsTest')),
+					h('button', { style: S.button(false), onClick: load, disabled: loading || saving, type: 'button' },
+						loading ? translate('settingsLoad') : translate('settingsReload'))),
+				h('div', { style: { ...S.hint, marginBottom: 8 } },
+					`${translate('settingsIntro')}${path === '' ? '' : `；${translate('settingsPathLabel')}：${path}`}`),
+				notice === '' ? null : h('div', { style: { ...S.hint, color: COLORS.success, marginBottom: 8 } }, notice),
+				probe === null ? null : h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 } },
+					probeRow('Kibana', probe.kibana),
+					probeRow(translate('groupGovernance'), probe.governance)),
+				h(ErrorBox, { message: error }),
+				section(translate('groupKibana'), [
+					text('kibanaBaseUrl', translate('fBaseUrl'), { minWidth: 260 }),
+					text('kibanaUsername', translate('fUsername')),
+					secret('kibanaPassword', 'kibanaHasPassword', 'clearKibana', translate('fPassword')),
+					text('kibanaIdp', translate('fIdp')),
+					text('kibanaIndex', translate('fIndex')),
+					h('label', { style: { ...S.field, minWidth: 140, justifyContent: 'flex-end' } },
+						h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, cursor: 'pointer' } },
+							h('input', {
+								type: 'checkbox',
+								checked: draft.kibanaInsecure !== false,
+								onChange: (event) => patch('kibanaInsecure', event.target.checked),
+							}),
+							translate('fInsecure'))),
+					text('nsFat', translate('fNsFat')),
+					text('nsUat', translate('fNsUat')),
+					text('nsDev', translate('fNsDev')),
+				]),
+				section(translate('groupGovernance'), [
+					text('govBaseUrl', translate('fBaseUrl'), { minWidth: 260 }),
+					text('govHibbert', translate('fHibbert'), { minWidth: 260 }),
+					text('govUsername', translate('fUsername')),
+					secret('govPassword', 'govHasPassword', 'clearGovernance', translate('fPassword')),
+					text('govProjectId', translate('fProjectId'), { minWidth: 120 }),
+					text('govProjectName', translate('fProjectName')),
+					text('govDatacenter', translate('fDatacenter')),
+				]),
+				section(translate('groupDefaults'), [
+					text('env', translate('fEnv'), { minWidth: 100 }),
+					text('timezone', translate('fTimezone')),
+					text('windowMinutes', translate('fWindow'), { minWidth: 140 }),
+					text('maxHits', translate('fMaxHits'), { minWidth: 140 }),
+					text('exportLimit', translate('fExportLimit'), { minWidth: 140 }),
+				]),
+				section(translate('groupProjects'), [
+					h('label', { style: { ...S.field, flex: '1 1 100%' } },
+						h('span', { style: S.label }, translate('fProjects')),
+						h('textarea', {
+							style: { ...S.input, minHeight: 60, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+							value: draft.projectsText ?? '',
+							onChange: (event) => patch('projectsText', event.target.value),
+						})),
+				]),
+				section(translate('groupLlm'), [
+					text('llmProvider', translate('fLlmProvider')),
+					text('llmModel', translate('fLlmModel'), { minWidth: 240 }),
+				]),
+				section(translate('groupMisc'), [
+					text('analyzeSessionId', translate('fSession'), { minWidth: 420 }),
+				]));
 		}
 
 
@@ -1953,7 +2342,7 @@ window.__ModuleLoader__.load({
 							},
 						}, health.ok ? translate('connected') : `${translate('disconnected')}：${String(health.reason ?? '').slice(0, 60)}`),
 					h('div', { style: S.tabs },
-						[['analyze', 'tabAnalyze'], ['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['ask', 'tabAsk'], ['audit', 'tabAudit']].map(([key, labelKey]) =>
+						[['analyze', 'tabAnalyze'], ['logs', 'tabLogs'], ['trace', 'tabTrace'], ['status', 'tabStatus'], ['ask', 'tabAsk'], ['audit', 'tabAudit'], ['settings', 'tabSettings']].map(([key, labelKey]) =>
 							h('button', {
 								key,
 								style: S.tab(tab === key),
@@ -1966,7 +2355,8 @@ window.__ModuleLoader__.load({
 					tab === 'trace' ? h(TraceTab, { pending: pendingTrace, onConsumed: consumePending }) : null,
 					tab === 'status' ? h(StatusTab, null) : null,
 					tab === 'ask' ? h(AskTab, null) : null,
-					tab === 'audit' ? h(AuditTab, null) : null),
+					tab === 'audit' ? h(AuditTab, null) : null,
+					tab === 'settings' ? h(SettingsTab, null) : null),
 				menu === null ? null : h('div', {
 					style: {
 						position: 'fixed',

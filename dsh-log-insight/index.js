@@ -12,6 +12,7 @@ import { searchCallChains, aggregateServiceStatus } from './lib/governance-query
 import { fetchTraceTree, flattenTree, findBottleneck } from './lib/trace-fetch.js';
 import { resolveExportDir, fetchAllLogs, writeLogExport } from './lib/export.js';
 import { appendAudit, readAudit, summarizeParams } from './lib/audit.js';
+import { applyIncoming, maskSecrets, normalizeNumbers, readSettings, resolveConfig, settingsFile, writeSettings } from './lib/settings.js';
 import { searchJava, searchJavaMany, readSnippet, buildKeywords, pickEndpoint, findClassFile, extractServiceVars, extractLisaNames, shortServiceName } from './lib/code-scan.js';
 
 export const name = 'log-insight';
@@ -45,15 +46,39 @@ function readClientRequest(body) {
 }
 
 export function apply(ctx, config) {
-  const kibanaConfig = config?.kibana ?? {};
-  const defaults = config?.defaults ?? {};
+  // 插件自带的 cordis.patch.yml 只是空模板；真实内网地址与账号密码属于本机私有配置，
+  // 由面板「设置」页写入 $DSH_HOME/log-insight/settings.json，不进代码仓库。
+  const patchConfig = config ?? {};
+  let kibanaConfig = {};
+  let govConfig = {};
+  let defaults = {};
+  let projects = {};
+  let llmConfig = {};
+  let analyzeSessionId = '';
   let session = null;
-
-  const govConfig = config?.governance ?? {};
-  const llmConfig = config?.llm ?? {};
-  const projects = config?.projects ?? {};
-  const analyzeSessionId = typeof config?.analyzeSessionId === 'string' ? config.analyzeSessionId : '';
   let govSession = null;
+
+  /** 生效配置快照，面板保存后用于回显。 */
+  let currentConfig = resolveConfig(patchConfig, readSettings());
+
+  /**
+   * 重新计算生效配置，并丢弃旧会话（改了地址或密码必须重登）。
+   * @returns {object} 新的生效配置
+   */
+  function refreshConfig() {
+    currentConfig = resolveConfig(patchConfig, readSettings());
+    kibanaConfig = currentConfig.kibana ?? {};
+    govConfig = currentConfig.governance ?? {};
+    defaults = currentConfig.defaults ?? {};
+    projects = currentConfig.projects ?? {};
+    llmConfig = currentConfig.llm ?? {};
+    analyzeSessionId = typeof currentConfig.analyzeSessionId === 'string' ? currentConfig.analyzeSessionId : '';
+    session = null;
+    govSession = null;
+    return currentConfig;
+  }
+
+  refreshConfig();
 
   /** 惰性创建 Kibana 会话。 */
   function getSession() {
@@ -1557,6 +1582,57 @@ export function apply(ctx, config) {
     },
   }));
 
+  //#region 设置：面板可读写的本机私有配置
+
+  /**
+   * 面板读取设置。密码不回传浏览器，只给 hasPassword 标记。
+   * @returns {Promise<object>} 脱敏后的设置
+   */
+  async function runSettingsGet() {
+    return { ok: true, path: settingsFile(), settings: maskSecrets(currentConfig) };
+  }
+
+  /**
+   * 面板保存设置。落盘后重算配置并丢弃旧会话，新凭据下一次查询即生效。
+   * @param {object} payload 面板提交的配置
+   * @returns {Promise<object>} 保存结果
+   */
+  async function runSettingsSave(payload) {
+    const incoming = normalizeNumbers(payload?.settings ?? payload ?? {});
+    const next = applyIncoming(currentConfig, incoming);
+    const { path: file } = writeSettings(next);
+    refreshConfig();
+    return { ok: true, path: file, settings: maskSecrets(currentConfig) };
+  }
+
+  /**
+   * 连通性自检：分别试连 Kibana 与服务治理，失败原因原样返回给面板。
+   * @returns {Promise<object>} 各服务结果
+   */
+  async function runSettingsTest() {
+    const probe = async (label, run) => {
+      const started = Date.now();
+      try {
+        await run();
+        return { label, ok: true, durationMs: Date.now() - started };
+      } catch (error) {
+        return { label, ok: false, durationMs: Date.now() - started, reason: String(error?.message ?? error) };
+      }
+    };
+    const kibana = await probe('kibana', async () => {
+      if (!kibanaConfig.baseUrl) throw new Error('未配置 Kibana 地址');
+      await getSession().login();
+    });
+    const governance = await probe('governance', async () => {
+      if (!govConfig.baseUrl) throw new Error('未配置服务治理地址');
+      await getGovSession().login();
+    });
+    // 两层都成功才算连通；两层都失败也正常返回，让面板逐项显示原因
+    return { ok: true, kibana, governance };
+  }
+
+  //#endregion
+
   //#region 面板 RPC：Web UI 通过 connection.rpc 调用同一批核心函数
 
   /** 面板可调用的端点与处理函数映射。 */
@@ -1570,12 +1646,17 @@ export function apply(ctx, config) {
     'ask-history': runAskHistory,
     'ask-load': runAskLoad,
     'ask-clear': runAskClear,
+    'settings-get': runSettingsGet,
+    'settings-save': runSettingsSave,
+    'settings-test': runSettingsTest,
     ping: async () => ({
       ok: true,
       env: defaults.env ?? 'fat',
       kibana: kibanaConfig.baseUrl ?? '',
       governance: govConfig.baseUrl ?? '',
       hibbert: govConfig.hibbertBaseUrl ?? '',
+      settingsPath: settingsFile(),
+      configured: Boolean(kibanaConfig.baseUrl && kibanaConfig.username && kibanaConfig.password),
     }),
     search: runLogSearch,
     trace: runTraceDetail,

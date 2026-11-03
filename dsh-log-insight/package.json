@@ -1,9 +1,9 @@
 {
   "name": "dsh-log-insight",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "日志与调用链洞察工具",
+  "description": "日志与调用链洞察工具（内网配置在面板设置页填写，不随仓库分发）",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
